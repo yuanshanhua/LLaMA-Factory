@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import json
 from contextlib import nullcontext
 from typing import TYPE_CHECKING, Literal, Optional
 
@@ -30,14 +29,14 @@ if TYPE_CHECKING:
     from transformers import PreTrainedModel
     from trl import AutoModelForCausalLMWithValueHead
 
+from index_advisor.get_reward_from_db import get_reward
+
 
 def get_rewards_from_server(server_url: str, messages: list[str]) -> list["torch.Tensor"]:
-    r"""Get reward scores from the API server."""
-    headers = {"Content-Type": "application/json"}
-    payload = {"model": "model", "messages": messages}
-    response = requests.post(server_url, json=payload, headers=headers)
-    rewards = json.loads(response.text)["scores"]
-    return torch.Tensor(rewards)
+    """Gets reward scores from the API server."""
+    # 修改此函数以使用自定义方式获取 reward, 需要设置 --reward_model_type api
+    rewards = [get_reward(m) for m in messages]
+    return [torch.tensor(r) for r in rewards]
 
 
 def replace_model(model: "AutoModelForCausalLMWithValueHead", target: Literal["default", "reward"]) -> None:
