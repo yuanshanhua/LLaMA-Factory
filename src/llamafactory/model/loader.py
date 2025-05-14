@@ -159,7 +159,7 @@ def load_model(
                 model = load_class.from_pretrained(**init_kwargs)
                 from lmf_hooks.model import hook_load_model
 
-                model = hook_load_model(model)
+                model = hook_load_model(model, model_args.compute_dtype, tokenizer)
                 if getattr(model.config, "model_type", None) == "qwen2_5_omni":
                     model = model.thinker  # use part of Omni model
 
@@ -171,6 +171,9 @@ def load_model(
         register_autoclass(config, model, tokenizer)
 
     model = init_adapter(config, model, model_args, finetuning_args, is_trainable)
+    # from lmf_hooks.model import hook_load_model # 在此处 hook 会导致 oom, 原因不明
+
+    # model = hook_load_model(model, model_args.compute_dtype, tokenizer)
 
     if add_valuehead:
         model = AutoModelForCausalLMWithValueHead.from_pretrained(model)
