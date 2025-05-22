@@ -101,6 +101,8 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
             accelerator_kwargs={"step_scheduler_with_optimizer": False},
             log_with=training_args.report_to[0] if training_args.report_to else None,
             project_kwargs={"logging_dir": training_args.logging_dir},
+            # 避免移除 columns 列. PPOTrainer 会根据 model.forward 的参数移除列, 但 PPO 看到的 model 是 AutoModelForCausalLMWithValueHead
+            remove_unused_columns=False,
         )
 
         # Add deepspeed config
@@ -243,8 +245,10 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
             for idx in range(0, self.config.batch_size, self.config.mini_batch_size):
                 mini_batch = {
                     "input_ids": batch["input_ids"][idx : idx + self.config.mini_batch_size],
-                    "attention_mask": batch["attention_mask"][idx : idx + self.config.mini_batch_size]
+                    "attention_mask": batch["attention_mask"][idx : idx + self.config.mini_batch_size],
                 }
+                if 'columns' in batch:
+                    mini_batch["columns"] = batch["columns"][idx : idx + self.config.mini_batch_size]
                 mini_batch_queries, mini_batch_responses = self.get_inputs(mini_batch)
                 mini_batch_rewards = self.get_rewards(mini_batch_queries, mini_batch_responses)
                 queries.extend(mini_batch_queries)

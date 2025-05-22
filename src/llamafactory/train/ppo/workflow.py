@@ -42,6 +42,9 @@ def run_ppo(
     tokenizer_module = load_tokenizer(model_args)
     tokenizer = tokenizer_module["tokenizer"]
     template = get_template_and_fix_tokenizer(tokenizer, data_args)
+    from lmf_hooks.model import hook_tokenizer
+
+    tokenizer = hook_tokenizer(tokenizer)
     dataset_module = get_dataset(template, model_args, data_args, training_args, stage="ppo", **tokenizer_module)
     model = load_model(tokenizer, model_args, finetuning_args, training_args.do_train, add_valuehead=True)
 

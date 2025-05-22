@@ -181,6 +181,13 @@ class MultiModalDataCollatorForSeq2Seq(DataCollatorForSeq2Seq):
             for i, feature in enumerate(features):
                 feature["token_type_ids"] = token_type_ids[i]
 
+        # padding columns
+        if "columns" in features[0]:
+            max_len = max(len(d["columns"]) for d in features)
+            hidden_size = len(features[0]["columns"][0])
+            for d in features:
+                if (l := len(d["columns"])) < max_len:
+                    d["columns"].extend([[0] * hidden_size] * (max_len - l))
         features: dict[str, torch.Tensor] = super().__call__(features)
 
         if self.model is not None and hasattr(self.model, "get_rope_index"):  # for qwen2vl mrope

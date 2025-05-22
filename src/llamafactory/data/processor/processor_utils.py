@@ -39,6 +39,14 @@ class DatasetProcessor(ABC):
         r"""Build model inputs from the examples."""
         ...
 
+    def preprocess_dataset_tb(self, examples: dict[str, list[Any]]) -> dict[str, list[Any]]:
+        """将原数据集中的未知字段添加到预处理后的数据集中."""
+        res = self.preprocess_dataset(examples)
+        for key in examples:
+            if not key.startswith("_") and key not in res:  # 下划线开头的是中间结果
+                res[key] = examples[key]
+        return res
+
     @abstractmethod
     def print_data_example(self, example: dict[str, list[int]]) -> None:
         r"""Print a data example to stdout."""
