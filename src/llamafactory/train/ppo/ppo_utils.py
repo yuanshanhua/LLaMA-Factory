@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     from transformers import PreTrainedModel
     from trl import AutoModelForCausalLMWithValueHead
 
-from index_advisor.get_reward_from_db import get_reward
+from lmf_hooks.reward import get_reward
 
 
 def get_rewards_from_server(server_url: str, messages: list[str]) -> list["torch.Tensor"]:
