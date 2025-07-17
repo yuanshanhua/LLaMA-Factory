@@ -161,3 +161,15 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
         with open(output_prediction_file, "w", encoding="utf-8") as f:
             for text, pred, label in zip(decoded_inputs, decoded_preds, decoded_labels):
                 f.write(json.dumps({"prompt": text, "predict": pred, "label": label}, ensure_ascii=False) + "\n")
+
+    @override
+    def _save(self, output_dir=None, state_dict=None):
+        # 获取原始state_dict
+        raw_state_dict = self.model.state_dict()
+
+        # 筛选需要保存的参数
+        filtered_state_dict = {
+            name: param for name, param in raw_state_dict.items() if "multi_modal_projector" in name
+        }
+        # 调用父类保存方法
+        super()._save(output_dir=output_dir, state_dict=filtered_state_dict)
