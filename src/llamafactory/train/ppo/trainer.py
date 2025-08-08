@@ -247,7 +247,7 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
                     "input_ids": batch["input_ids"][idx : idx + self.config.mini_batch_size],
                     "attention_mask": batch["attention_mask"][idx : idx + self.config.mini_batch_size],
                 }
-                if 'columns' in batch:
+                if "columns" in batch:
                     mini_batch["columns"] = batch["columns"][idx : idx + self.config.mini_batch_size]
                 mini_batch_queries, mini_batch_responses = self.get_inputs(mini_batch)
                 mini_batch_rewards = self.get_rewards(mini_batch_queries, mini_batch_responses)
@@ -487,9 +487,11 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
             output_dir = self.args.output_dir
 
         if self.is_fsdp_enabled or self.is_deepspeed_enabled:
+            print("1️⃣ Saving model with FSDP or DeepSpeed enabled.")
             try:
                 state_dict = self.accelerator.get_state_dict(self.model)  # must be called at all ranks
                 if self.args.should_save:
+                    print(f"{list(state_dict.keys())=}")
                     self._save(output_dir, state_dict=state_dict)
             except ValueError:
                 logger.warning_rank0(
@@ -503,5 +505,7 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
                 self.model.save_checkpoint(output_dir)
 
         elif self.args.should_save:
+            print("2️⃣ Saving model with FSDP or DeepSpeed disabled.")
             unwrapped_model: AutoModelForCausalLMWithValueHead = self.accelerator.unwrap_model(self.model)
+            print(f"{list(unwrapped_model.state_dict().keys())=}")
             self._save(output_dir, state_dict=unwrapped_model.state_dict())
