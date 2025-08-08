@@ -165,11 +165,10 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
     @override
     def _save(self, output_dir=None, state_dict=None):
         # 获取原始state_dict
-        raw_state_dict = self.model.state_dict()
+        if state_dict is None:
+            state_dict = self.accelerator.get_state_dict(self.model)
 
         # 筛选需要保存的参数
-        filtered_state_dict = {
-            name: param for name, param in raw_state_dict.items() if "multi_modal_projector" in name
-        }
+        filtered_state_dict = {name: param for name, param in state_dict.items() if "multi_modal_projector" in name}
         # 调用父类保存方法
         super()._save(output_dir=output_dir, state_dict=filtered_state_dict)
