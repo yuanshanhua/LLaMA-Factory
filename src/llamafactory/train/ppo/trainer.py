@@ -242,6 +242,7 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
             self.model.eval()
             self.tokenizer.padding_side = "right"  # change padding side
             queries, responses, rewards = [], [], []
+            columns = []
             for idx in range(0, self.config.batch_size, self.config.mini_batch_size):
                 mini_batch = {
                     "input_ids": batch["input_ids"][idx : idx + self.config.mini_batch_size],
@@ -249,11 +250,17 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
                 }
                 if "columns" in batch:
                     mini_batch["columns"] = batch["columns"][idx : idx + self.config.mini_batch_size]
-                mini_batch_queries, mini_batch_responses = self.get_inputs(mini_batch)
+                mini_batch_queries, mini_batch_responses, mini_batch_columns = self.get_inputs(mini_batch)
                 mini_batch_rewards = self.get_rewards(mini_batch_queries, mini_batch_responses)
                 queries.extend(mini_batch_queries)
                 responses.extend(mini_batch_responses)
                 rewards.extend(mini_batch_rewards)
+                if mini_batch_columns:
+                    columns.append(mini_batch_columns)
+            if columns:
+                self._cached_columns: list[list] = columns
+            else:
+                self._cached_columns = None
 
             # Run PPO step
             self.model.train()
@@ -308,19 +315,60 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
         optimizer = create_custom_optimizer(model, training_args, finetuning_args)
         if optimizer is None:
             decay_params, nodecay_params = [], []
+            # 为多模态模型分别设置参数组
+            projector_params, lm_params = [], []
+
             decay_param_names = self.get_decay_parameter_names(model)
             for name, param in model.named_parameters():
                 if param.requires_grad:
+                    # 区分投影层和语言模型参数
+                    if "multi_modal_projector" in name:
+                        projector_params.append(param)
+                    else:
+                        lm_params.append(param)
+
+                    # 原有的 weight decay 逻辑
                     if name in decay_param_names:
                         decay_params.append(param)
                     else:
                         nodecay_params.append(param)
 
             optim_class, optim_kwargs = Trainer.get_optimizer_cls_and_kwargs(training_args)
-            param_groups = [
-                dict(params=nodecay_params),
-                dict(params=decay_params, weight_decay=training_args.weight_decay),
-            ]
+
+            # 根据是否有多模态投影层来设置参数组
+            if len(projector_params) > 0:
+                # 为投影层和语言模型设置不同的学习率
+                projector_lr = getattr(finetuning_args, "projector_lr", training_args.learning_rate)
+                lm_lr = training_args.learning_rate
+
+                param_groups = []
+
+                # 投影层参数组
+                for name, param in model.named_parameters():
+                    if param.requires_grad and "multi_modal_projector" in name:
+                        if name in decay_param_names:
+                            param_groups.append(
+                                {"params": [param], "lr": projector_lr, "weight_decay": training_args.weight_decay}
+                            )
+                        else:
+                            param_groups.append({"params": [param], "lr": projector_lr, "weight_decay": 0.0})
+
+                # 语言模型参数组
+                for name, param in model.named_parameters():
+                    if param.requires_grad and "multi_modal_projector" not in name:
+                        if name in decay_param_names:
+                            param_groups.append(
+                                {"params": [param], "lr": lm_lr, "weight_decay": training_args.weight_decay}
+                            )
+                        else:
+                            param_groups.append({"params": [param], "lr": lm_lr, "weight_decay": 0.0})
+            else:
+                # 原有逻辑，适用于标准模型
+                param_groups = [
+                    dict(params=nodecay_params),
+                    dict(params=decay_params, weight_decay=training_args.weight_decay),
+                ]
+
             optimizer = optim_class(param_groups, **optim_kwargs)
 
         return optimizer
@@ -339,7 +387,9 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
         return lr_scheduler
 
     @torch.no_grad()
-    def get_inputs(self, batch: dict[str, "torch.Tensor"]) -> tuple[list["torch.Tensor"], list["torch.Tensor"]]:
+    def get_inputs(
+        self, batch: dict[str, "torch.Tensor"]
+    ) -> tuple[list["torch.Tensor"], list["torch.Tensor"], list["torch.Tensor"]]:
         r"""Generate model's responses given queries."""
         if batch["input_ids"].size(0) == 1:  # handle llama2 ppo with gradient accumulation > 1
             start_index = (batch["input_ids"][0] != self.tokenizer.pad_token_id).nonzero()[0].item()
@@ -360,6 +410,8 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
         query = batch["input_ids"].detach().cpu()
         response = generate_output[:, batch["input_ids"].size(-1) :].detach().cpu()
         queries, responses = [], []
+        columns = []
+        column = batch.get("columns", None)
         for i in range(len(query)):
             query_start_index = (query[i] != self.tokenizer.pad_token_id).nonzero()[0].item()
             response_indexes = (response[i] != self.tokenizer.pad_token_id).nonzero()
@@ -373,8 +425,21 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
 
             queries.append(query[i, query_start_index:])  # remove padding from left
             responses.append(response[i, :response_length])  # remove padding from right
+            if column is not None:
+                # 移除 columns 的 padding，columns 形状为 (batch_size, length, hidden_size)
+                # padding 方式是 length 中后面几个全为 0*hidden_size 的零向量
+                column_i = column[i]  # shape: (length, hidden_size)
+                # 找到非零向量的位置，即去除后面的零向量 padding
+                non_zero_mask = column_i.norm(dim=-1) > 0  # shape: (length,)
+                if non_zero_mask.any():
+                    # 找到最后一个非零向量的位置
+                    last_non_zero_idx = non_zero_mask.nonzero()[-1].item() + 1
+                    columns.append(column_i[:last_non_zero_idx])
+                else:
+                    # 如果全是零向量，保留一个零向量
+                    columns.append(column_i[:1])
 
-        return queries, responses
+        return queries, responses, columns
 
     @torch.no_grad()
     def get_rewards(
@@ -408,6 +473,63 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
 
         rewards = values.gather(dim=-1, index=(batch["attention_mask"].sum(dim=-1, keepdim=True) - 1))
         return rewards.float().detach()  # use fp32 type
+
+    @override
+    def prepare_model_inputs(self, queries: torch.Tensor, responses: torch.Tensor) -> dict[str, torch.Tensor]:
+        if self.is_encoder_decoder:
+            input_data = self.data_collator(
+                [{"input_ids": q, "attention_mask": torch.ones_like(q)} for q in queries]
+            ).to(self.current_device)
+
+            decoder_inputs = self.data_collator(
+                [{"input_ids": r, "attention_mask": torch.ones_like(r)} for r in responses]
+            ).to(self.current_device)
+
+            input_data["decoder_input_ids"] = decoder_inputs["input_ids"]
+            input_data["decoder_attention_mask"] = decoder_inputs["attention_mask"]
+        else:
+            input_ids = [torch.cat([q, r], dim=-1) for q, r in zip(queries, responses)]
+
+            input_data = self.data_collator(
+                [{"input_ids": ids, "attention_mask": torch.ones_like(ids)} for ids in input_ids]
+            ).to(self.current_device)
+            print(f"{input_data['input_ids'].size()=}")
+
+        # 如果存在columns数据，需要从batch中获取并添加到input_data
+        if self._cached_columns is not None:
+            # self._cached_columns -> batch_size/mini_batch_size * (mini_batch_size * Tensor)
+            # Tensor 为单个input对应的若干列的嵌入. shape: (length, hidden_size)
+            flat_columns = [col for batch_columns in self._cached_columns for col in batch_columns]
+            batch_size = len(flat_columns)
+            if batch_size > 0:
+                # 获取 hidden_size（从第一个非空的 tensor 获取）
+                hidden_size = None
+                max_length = 0
+
+                # 找到 hidden_size 和最大长度
+                for column in flat_columns:
+                    if hidden_size is None:
+                        hidden_size = column.size(-1)
+                    max_length = max(max_length, column.size(0))
+
+                if hidden_size is not None:
+                    # 创建 padded tensor
+                    padded_columns = torch.zeros(
+                        batch_size,
+                        max_length,
+                        hidden_size,
+                        dtype=self._cached_columns[0][0].dtype,
+                        device=self.current_device,
+                    )
+                    # print(f"{padded_columns.size()=}")  # padded_columns.size()=torch.Size([3, 15, 768])
+                    # 填充实际数据
+                    for i, column in enumerate(flat_columns):
+                        # print(f"{column.size()=}")  # column.size()=torch.Size([?, 768])
+                        padded_columns[i, : column.size(0)] = column
+                    input_data["columns"] = padded_columns
+
+        input_data.pop("labels", None)  # we don't want to compute LM losses
+        return input_data
 
     @override
     @PPODecorators.empty_device_cache()
@@ -486,12 +608,14 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
         if output_dir is None:
             output_dir = self.args.output_dir
 
+        # from index_advisor.logging import logger
+
+        # logger = logger.getChild("ppo.trainer")
+
         if self.is_fsdp_enabled or self.is_deepspeed_enabled:
-            print("1️⃣ Saving model with FSDP or DeepSpeed enabled.")
             try:
                 state_dict = self.accelerator.get_state_dict(self.model)  # must be called at all ranks
                 if self.args.should_save:
-                    print(f"{list(state_dict.keys())=}")
                     self._save(output_dir, state_dict=state_dict)
             except ValueError:
                 logger.warning_rank0(
@@ -505,7 +629,9 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
                 self.model.save_checkpoint(output_dir)
 
         elif self.args.should_save:
-            print("2️⃣ Saving model with FSDP or DeepSpeed disabled.")
+            # 实际执行
             unwrapped_model: AutoModelForCausalLMWithValueHead = self.accelerator.unwrap_model(self.model)
-            print(f"{list(unwrapped_model.state_dict().keys())=}")
+            # logger.debug(f"{type(unwrapped_model)=}")
+            # logger.debug(f"{list(unwrapped_model.state_dict().keys())=}")
+            # list(unwrapped_model.state_dict().keys())=['v_head.summary.weight', 'v_head.summary.bias']
             self._save(output_dir, state_dict=unwrapped_model.state_dict())

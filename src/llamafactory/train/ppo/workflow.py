@@ -48,6 +48,16 @@ def run_ppo(
     dataset_module = get_dataset(template, model_args, data_args, training_args, stage="ppo", **tokenizer_module)
     model = load_model(tokenizer, model_args, finetuning_args, training_args.do_train, add_valuehead=True)
 
+    from lmf_hooks.model import hook_rl_model
+
+    model = hook_rl_model(model)
+
+    # from index_advisor.logging import logger
+
+    # logger = logger.getChild("ppo.workflow")
+    # logger.debug(f"{model=}")
+    # logger.debug(f"{model.pretrained_model=}")
+
     tokenizer.padding_side = "left"  # use left-padding in generation while using right-padding in training
     data_collator = MultiModalDataCollatorForSeq2Seq(template=template, model=model, **tokenizer_module)
 

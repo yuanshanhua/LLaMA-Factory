@@ -183,11 +183,11 @@ class MultiModalDataCollatorForSeq2Seq(DataCollatorForSeq2Seq):
 
         # padding columns
         if "columns" in features[0]:
-            max_len = max(len(d["columns"]) for d in features)
-            hidden_size = len(features[0]["columns"][0])
+            max_len = max(len(d["columns"]) for d in features)  # 这批次输入最多有多少列
+            hidden_size = len(features[0]["columns"][0])  # 列嵌入的维度
             for d in features:
                 if (l := len(d["columns"])) < max_len:
-                    d["columns"].extend([[0] * hidden_size] * (max_len - l))
+                    d["columns"].extend([[0] * hidden_size] * (max_len - l))  # 全部 padding 到 max_len
         features: dict[str, torch.Tensor] = super().__call__(features)
 
         if self.model is not None and hasattr(self.model, "get_rope_index"):  # for qwen2vl mrope

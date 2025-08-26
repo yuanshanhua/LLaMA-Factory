@@ -70,10 +70,15 @@ def fix_valuehead_checkpoint(
     if not isinstance(model.pretrained_model, (PreTrainedModel, PeftModel)):
         return
 
+    # from index_advisor.logging import logger
+
+    # logger = logger.getChild("llamafactory.fix_valuehead_checkpoint")
+
     if safe_serialization:
         path_to_checkpoint = os.path.join(output_dir, SAFE_WEIGHTS_NAME)
         with safe_open(path_to_checkpoint, framework="pt", device="cpu") as f:
             state_dict: dict[str, torch.Tensor] = {key: f.get_tensor(key) for key in f.keys()}
+            # logger.debug(f"{list(state_dict.keys())=}")
     else:
         path_to_checkpoint = os.path.join(output_dir, WEIGHTS_NAME)
         state_dict: dict[str, torch.Tensor] = torch.load(path_to_checkpoint, map_location="cpu")
@@ -86,11 +91,14 @@ def fix_valuehead_checkpoint(
         else:
             decoder_state_dict[name.replace("pretrained_model.", "", 1)] = param
 
+    # logger.debug(f"1. {os.path.exists(os.path.join(output_dir,'adapter_model.safetensors'))=}")
     model.pretrained_model.save_pretrained(
         output_dir, state_dict=decoder_state_dict or None, safe_serialization=safe_serialization
     )
+    # logger.debug(f"2. {os.path.exists(os.path.join(output_dir,'adapter_model.safetensors'))=}")
 
     if safe_serialization:
+        # logger.debug(f"{list(v_head_state_dict.keys())=}")
         save_file(v_head_state_dict, os.path.join(output_dir, V_HEAD_SAFE_WEIGHTS_NAME), metadata={"format": "pt"})
     else:
         torch.save(v_head_state_dict, os.path.join(output_dir, V_HEAD_WEIGHTS_NAME))
