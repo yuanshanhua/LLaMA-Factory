@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any, Optional, Union
 
 import numpy as np
 import torch
+from safetensors.torch import save_file
 from transformers import Seq2SeqTrainer
 from typing_extensions import override
 
@@ -168,7 +169,18 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
         if state_dict is None:
             state_dict = self.accelerator.get_state_dict(self.model)
 
-        # 筛选需要保存的参数
-        filtered_state_dict = {name: param for name, param in state_dict.items() if "multi_modal_projector" in name}
+        from index_advisor.logging import logger
+
+        logger = logger.getChild("sft.trainer")
+
+        # 分割不同部分的参数
+        column_projector_state_dict = {
+            name: param for name, param in state_dict.items() if "multi_modal_projector" in name
+        }
+        logger.info(f"{list(column_projector_state_dict.keys())=}")
+        save_file(
+            column_projector_state_dict, os.path.join(output_dir, "projector.safetensors"), metadata={"format": "pt"}
+        )
+        lm_state_dict = {name: param for name, param in state_dict.items() if name not in column_projector_state_dict}
         # 调用父类保存方法
-        super()._save(output_dir=output_dir, state_dict=filtered_state_dict)
+        super()._save(output_dir=output_dir, state_dict=lm_state_dict)
