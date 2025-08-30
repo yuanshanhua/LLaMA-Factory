@@ -169,15 +169,15 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
         if state_dict is None:
             state_dict = self.accelerator.get_state_dict(self.model)
 
-        from index_advisor.logging import logger
+        # from index_advisor.logging import logger
 
-        logger = logger.getChild("sft.trainer")
+        # logger = logger.getChild("sft.trainer")
 
         # 分割不同部分的参数
         column_projector_state_dict = {
             name: param for name, param in state_dict.items() if "multi_modal_projector" in name
         }
-        logger.info(f"{list(column_projector_state_dict.keys())=}")
+        # logger.info(f"{list(column_projector_state_dict.keys())=}")
         save_file(
             column_projector_state_dict, os.path.join(output_dir, "projector.safetensors"), metadata={"format": "pt"}
         )

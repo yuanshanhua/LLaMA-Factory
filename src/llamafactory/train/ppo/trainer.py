@@ -24,6 +24,8 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 from accelerate.utils import DistributedDataParallelKwargs
+from index_advisor.logging import logger as ia_logger
+from safetensors.torch import save_file
 from tqdm import tqdm
 from transformers import GenerationConfig, Trainer, TrainerControl, TrainerState
 from transformers.optimization import get_scheduler
@@ -59,6 +61,8 @@ if TYPE_CHECKING:
 
 
 logger = logging.get_logger(__name__)
+
+mylogger = ia_logger.getChild("ppo.trainer")
 
 
 class CustomPPOTrainer(PPOTrainer, Trainer):
@@ -318,8 +322,14 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
             # 为多模态模型分别设置参数组
             projector_params, lm_params = [], []
 
+            # mylogger.debug(f"create_optimizer {type(model)=}")
+            # mylogger.debug(f"create_optimizer {list(model.state_dict().keys())=}")
+
+            # mylogger.debug(f"create_optimizer {type(model.pretrained_model)=}")
+            # mylogger.debug(f"create_optimizer {list(model.pretrained_model.state_dict().keys())=}")
             decay_param_names = self.get_decay_parameter_names(model)
-            for name, param in model.named_parameters():
+            named_parameters = list(model.named_parameters())
+            for name, param in named_parameters:
                 if param.requires_grad:
                     # 区分投影层和语言模型参数
                     if "multi_modal_projector" in name:
@@ -340,28 +350,32 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
                 # 为投影层和语言模型设置不同的学习率
                 projector_lr = getattr(finetuning_args, "projector_lr", training_args.learning_rate)
                 lm_lr = training_args.learning_rate
+                mylogger.debug(f"为 projector 和 lm 使用不同的学习率: {projector_lr=} {lm_lr=}")
 
                 param_groups = []
 
                 # 投影层参数组
-                for name, param in model.named_parameters():
-                    if param.requires_grad and "multi_modal_projector" in name:
+                for name, param in named_parameters:
+                    if not param.requires_grad:
+                        continue
+                    if "multi_modal_projector" in name:
                         if name in decay_param_names:
                             param_groups.append(
                                 {"params": [param], "lr": projector_lr, "weight_decay": training_args.weight_decay}
                             )
+                            mylogger.debug(f"添加 projector decay 参数组: {name} {param.size()}")
                         else:
                             param_groups.append({"params": [param], "lr": projector_lr, "weight_decay": 0.0})
-
-                # 语言模型参数组
-                for name, param in model.named_parameters():
-                    if param.requires_grad and "multi_modal_projector" not in name:
+                            mylogger.debug(f"添加 projector 参数组: {name} {param.size()}")
+                    else:
                         if name in decay_param_names:
                             param_groups.append(
                                 {"params": [param], "lr": lm_lr, "weight_decay": training_args.weight_decay}
                             )
+                            mylogger.debug(f"添加 lm decay 参数组: {name} {param.size()}")
                         else:
                             param_groups.append({"params": [param], "lr": lm_lr, "weight_decay": 0.0})
+                            mylogger.debug(f"添加 lm 参数组: {name} {param.size()}")
             else:
                 # 原有逻辑，适用于标准模型
                 param_groups = [
@@ -630,8 +644,22 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
 
         elif self.args.should_save:
             # 实际执行
+            # logger.debug(f"{type(self.model)=}")
+            # logger.debug(f"{list(self.model.state_dict().keys())=}")
             unwrapped_model: AutoModelForCausalLMWithValueHead = self.accelerator.unwrap_model(self.model)
             # logger.debug(f"{type(unwrapped_model)=}")
             # logger.debug(f"{list(unwrapped_model.state_dict().keys())=}")
             # list(unwrapped_model.state_dict().keys())=['v_head.summary.weight', 'v_head.summary.bias']
+            # logger.debug(f"{type(unwrapped_model.pretrained_model)=}")
+            # logger.debug(f"{list(unwrapped_model.pretrained_model.state_dict().keys())=}")
             self._save(output_dir, state_dict=unwrapped_model.state_dict())
+            column_projector_state_dict = {
+                name.removeprefix("base_model.model."): param
+                for name, param in unwrapped_model.pretrained_model.state_dict().items()
+                if "multi_modal_projector" in name
+            }
+            save_file(
+                column_projector_state_dict,
+                os.path.join(output_dir, "projector.safetensors"),
+                metadata={"format": "pt"},
+            )
