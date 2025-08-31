@@ -348,7 +348,7 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
             # 根据是否有多模态投影层来设置参数组
             if len(projector_params) > 0:
                 # 为投影层和语言模型设置不同的学习率
-                projector_lr = getattr(finetuning_args, "projector_lr", training_args.learning_rate)
+                projector_lr = finetuning_args.projector_lr or training_args.learning_rate
                 lm_lr = training_args.learning_rate
                 mylogger.debug(f"为 projector 和 lm 使用不同的学习率: {projector_lr=} {lm_lr=}")
 

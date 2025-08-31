@@ -391,6 +391,7 @@ class FinetuningArguments(
 ):
     r"""Arguments pertaining to which techniques we are going to fine-tuning with."""
 
+    projector_lr: Optional[float] = field(default=None, metadata={"help": "Learning rate for multi-modal projector."})
     pure_bf16: bool = field(
         default=False,
         metadata={"help": "Whether or not to train model in purely bf16 precision (without AMP)."},
