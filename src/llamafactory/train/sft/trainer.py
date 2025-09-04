@@ -175,7 +175,9 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
 
         # 分割不同部分的参数
         column_projector_state_dict = {
-            name: param for name, param in state_dict.items() if "multi_modal_projector" in name
+            name.removeprefix("base_model.model."): param
+            for name, param in state_dict.items()
+            if "multi_modal_projector" in name
         }
         # logger.info(f"{list(column_projector_state_dict.keys())=}")
         save_file(
