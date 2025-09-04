@@ -33,6 +33,8 @@ def find_all_linear_modules(model: "PreTrainedModel", freeze_vision_tower: bool)
         forbidden_modules.add("output_layer")
     elif model_type == "internlm2":
         forbidden_modules.add("output")
+    if model_type == "qwen_table":
+        forbidden_modules.update("multi_modal_projector", "multi_modal_projector2")
 
     if model_type in COMPOSITE_MODELS:
         forbidden_modules.add(COMPOSITE_MODELS[model_type].projector_key)
