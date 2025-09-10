@@ -246,7 +246,8 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
             self.model.eval()
             self.tokenizer.padding_side = "right"  # change padding side
             queries, responses, rewards = [], [], []
-            columns = []
+            columns: list[torch.Tensor] = []
+            sqls: list[torch.Tensor] = []
             for idx in range(0, self.config.batch_size, self.config.mini_batch_size):
                 mini_batch = {
                     "input_ids": batch["input_ids"][idx : idx + self.config.mini_batch_size],
@@ -254,20 +255,30 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
                 }
                 if "columns" in batch:
                     mini_batch["columns"] = batch["columns"][idx : idx + self.config.mini_batch_size]
-                mini_batch_queries, mini_batch_responses, mini_batch_columns = self.get_inputs(mini_batch)
+                mini_batch_queries, mini_batch_responses, mini_batch_columns, mini_batch_sqls = self.get_inputs(
+                    mini_batch
+                )
                 mini_batch_rewards = self.get_rewards(mini_batch_queries, mini_batch_responses)
                 queries.extend(mini_batch_queries)
                 responses.extend(mini_batch_responses)
                 rewards.extend(mini_batch_rewards)
                 if mini_batch_columns:
-                    columns.append(mini_batch_columns)
+                    columns.extend(mini_batch_columns)
+                if mini_batch_sqls:
+                    sqls.extend(mini_batch_sqls)
+
             if columns:
-                self._cached_columns: list[list] = columns
+                self._cached_columns = columns
             else:
                 self._cached_columns = None
+            if sqls:
+                self._cached_sqls = sqls
+            else:
+                self._cached_sqls = None
 
             # Run PPO step
             self.model.train()
+            # print(self.is_distributed)
             stats = self.step(queries, responses, rewards)
             self.tokenizer.padding_side = "left"  # restore padding side
             loss_meter.update(float(stats["ppo/loss/total"]), n=len(rewards))
@@ -403,7 +414,7 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
     @torch.no_grad()
     def get_inputs(
         self, batch: dict[str, "torch.Tensor"]
-    ) -> tuple[list["torch.Tensor"], list["torch.Tensor"], list["torch.Tensor"]]:
+    ) -> tuple[list["torch.Tensor"], list["torch.Tensor"], list["torch.Tensor"], list["torch.Tensor"]]:
         r"""Generate model's responses given queries."""
         if batch["input_ids"].size(0) == 1:  # handle llama2 ppo with gradient accumulation > 1
             start_index = (batch["input_ids"][0] != self.tokenizer.pad_token_id).nonzero()[0].item()
@@ -426,6 +437,8 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
         queries, responses = [], []
         columns = []
         column = batch.get("columns", None)
+        sqls = []
+        sql = batch.get("sqls", None)
         for i in range(len(query)):
             query_start_index = (query[i] != self.tokenizer.pad_token_id).nonzero()[0].item()
             response_indexes = (response[i] != self.tokenizer.pad_token_id).nonzero()
@@ -444,7 +457,7 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
                 # padding 方式是 length 中后面几个全为 0*hidden_size 的零向量
                 column_i = column[i]  # shape: (length, hidden_size)
                 # 找到非零向量的位置，即去除后面的零向量 padding
-                non_zero_mask = column_i.norm(dim=-1) > 0  # shape: (length,)
+                non_zero_mask = column_i.count_nonzero(dim=-1) > 0  # shape: (length,), type: bool
                 if non_zero_mask.any():
                     # 找到最后一个非零向量的位置
                     last_non_zero_idx = non_zero_mask.nonzero()[-1].item() + 1
@@ -452,8 +465,16 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
                 else:
                     # 如果全是零向量，保留一个零向量
                     columns.append(column_i[:1])
+            if sql is not None:
+                sql_i = sql[i]
+                non_zero_mask = sql_i.count_nonzero(dim=-1) > 0
+                if non_zero_mask.any():
+                    last_non_zero_idx = non_zero_mask.nonzero()[-1].item() + 1
+                    sqls.append(sql_i[:last_non_zero_idx])
+                else:
+                    sqls.append(sql_i[:1])
 
-        return queries, responses, columns
+        return queries, responses, columns, sqls
 
     @torch.no_grad()
     def get_rewards(
@@ -503,44 +524,15 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
             input_data["decoder_attention_mask"] = decoder_inputs["attention_mask"]
         else:
             input_ids = [torch.cat([q, r], dim=-1) for q, r in zip(queries, responses)]
-
-            input_data = self.data_collator(
-                [{"input_ids": ids, "attention_mask": torch.ones_like(ids)} for ids in input_ids]
-            ).to(self.current_device)
-            print(f"{input_data['input_ids'].size()=}")
-
-        # 如果存在columns数据，需要从batch中获取并添加到input_data
-        if self._cached_columns is not None:
-            # self._cached_columns -> batch_size/mini_batch_size * (mini_batch_size * Tensor)
-            # Tensor 为单个input对应的若干列的嵌入. shape: (length, hidden_size)
-            flat_columns = [col for batch_columns in self._cached_columns for col in batch_columns]
-            batch_size = len(flat_columns)
-            if batch_size > 0:
-                # 获取 hidden_size（从第一个非空的 tensor 获取）
-                hidden_size = None
-                max_length = 0
-
-                # 找到 hidden_size 和最大长度
-                for column in flat_columns:
-                    if hidden_size is None:
-                        hidden_size = column.size(-1)
-                    max_length = max(max_length, column.size(0))
-
-                if hidden_size is not None:
-                    # 创建 padded tensor
-                    padded_columns = torch.zeros(
-                        batch_size,
-                        max_length,
-                        hidden_size,
-                        dtype=self._cached_columns[0][0].dtype,
-                        device=self.current_device,
-                    )
-                    # print(f"{padded_columns.size()=}")  # padded_columns.size()=torch.Size([3, 15, 768])
-                    # 填充实际数据
-                    for i, column in enumerate(flat_columns):
-                        # print(f"{column.size()=}")  # column.size()=torch.Size([?, 768])
-                        padded_columns[i, : column.size(0)] = column
-                    input_data["columns"] = padded_columns
+            inputs = []
+            for i, ids in enumerate(input_ids):
+                inputs.append({"input_ids": ids, "attention_mask": torch.ones_like(ids)})
+                if self._cached_columns is not None:
+                    inputs[-1]["columns"] = self._cached_columns[i]
+                if self._cached_sqls is not None:
+                    inputs[-1]["sqls"] = self._cached_sqls[i]
+            # data_collator 会处理 padding, 包括 columns/sqls
+            input_data = self.data_collator(inputs).to(self.current_device)
 
         input_data.pop("labels", None)  # we don't want to compute LM losses
         return input_data
