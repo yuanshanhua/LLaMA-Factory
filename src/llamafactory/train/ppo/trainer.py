@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any, Callable, Optional
 
 import torch
 from accelerate.utils import DistributedDataParallelKwargs
-from index_advisor.logging import logger as ia_logger
+from index_advisor.ia_logging import logger as ia_logger
 from lmf_hooks.reward import get_reward
 from safetensors.torch import save_file
 from tqdm import tqdm
