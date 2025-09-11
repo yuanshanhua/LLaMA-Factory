@@ -29,14 +29,10 @@ if TYPE_CHECKING:
     from transformers import PreTrainedModel
     from trl import AutoModelForCausalLMWithValueHead
 
-from lmf_hooks.reward import get_reward
-
 
 def get_rewards_from_server(server_url: str, messages: list[str]) -> list["torch.Tensor"]:
     """Gets reward scores from the API server."""
-    # 修改此函数以使用自定义方式获取 reward, 需要设置 --reward_model_type api
-    rewards = [get_reward(m) for m in messages]
-    return [torch.tensor(r) for r in rewards]
+    ...
 
 
 def replace_model(model: "AutoModelForCausalLMWithValueHead", target: Literal["default", "reward"]) -> None:

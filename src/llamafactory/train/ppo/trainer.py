@@ -20,11 +20,12 @@ import os
 import sys
 import warnings
 from types import MethodType
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 import torch
 from accelerate.utils import DistributedDataParallelKwargs
 from index_advisor.logging import logger as ia_logger
+from lmf_hooks.reward import get_reward
 from safetensors.torch import save_file
 from tqdm import tqdm
 from transformers import GenerationConfig, Trainer, TrainerControl, TrainerState
@@ -43,7 +44,7 @@ from ...extras import logging
 from ...extras.misc import AverageMeter, count_parameters, get_current_device, get_logits_processor
 from ..callbacks import FixValueHeadModelCallback, SaveProcessorCallback
 from ..trainer_utils import create_custom_optimizer, create_custom_scheduler
-from .ppo_utils import dump_layernorm, get_rewards_from_server, replace_model, restore_layernorm
+from .ppo_utils import dump_layernorm, replace_model, restore_layernorm
 
 
 if TYPE_CHECKING:
@@ -81,6 +82,7 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
         tokenizer: "PreTrainedTokenizer",
         processor: Optional["ProcessorMixin"],
         data_collator: "DataCollatorWithPadding",
+        training_data_collator: Callable,
         train_dataset: Optional["Dataset"] = None,
         eval_dataset: Optional["Dataset"] = None,
     ) -> None:
@@ -140,6 +142,7 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
             dataset=train_dataset,
             optimizer=optimizer,
             data_collator=data_collator,
+            training_data_collator=training_data_collator,
             lr_scheduler=scheduler,
         )
 
@@ -487,9 +490,10 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
         Both inputs and outputs are put on CPU.
         """
         if self.finetuning_args.reward_model_type == "api":
-            token_ids = [torch.cat((q, r), dim=-1).tolist() for q, r in zip(queries, responses)]
-            messages = self.tokenizer.batch_decode(token_ids, skip_special_tokens=False)
-            return get_rewards_from_server(self.reward_model, messages)
+            prompt = self.tokenizer.batch_decode(queries, skip_special_tokens=True)
+            resp = self.tokenizer.batch_decode(responses, skip_special_tokens=True)
+            rewards = [get_reward(m) for m in zip(prompt, resp)]
+            return [torch.tensor(r) for r in rewards]
 
         batch: dict[str, torch.Tensor] = self.prepare_model_inputs(queries, responses)
         unwrapped_model: AutoModelForCausalLMWithValueHead = self.accelerator.unwrap_model(self.model)
@@ -531,8 +535,7 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
                     inputs[-1]["columns"] = self._cached_columns[i]
                 if self._cached_sqls is not None:
                     inputs[-1]["sqls"] = self._cached_sqls[i]
-            # data_collator 会处理 padding, 包括 columns/sqls
-            input_data = self.data_collator(inputs).to(self.current_device)
+            input_data = self.data_collator(inputs)
 
         input_data.pop("labels", None)  # we don't want to compute LM losses
         return input_data

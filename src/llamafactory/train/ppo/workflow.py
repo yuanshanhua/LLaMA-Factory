@@ -17,13 +17,18 @@
 
 from typing import TYPE_CHECKING, Optional
 
-from ...data import MultiModalDataCollatorForSeq2Seq, get_dataset, get_template_and_fix_tokenizer
+from lmf_hooks.model import config, logger
+
+from scripts.sft_projector import CustomDataset, new_collator_rl
+
 from ...extras.ploting import plot_loss
 from ...model import load_model, load_tokenizer
 from ..callbacks import fix_valuehead_checkpoint
 from ..trainer_utils import create_ref_model, create_reward_model
 from .trainer import CustomPPOTrainer
 
+
+logger = logger.getChild("ppo.workflow")
 
 if TYPE_CHECKING:
     from transformers import Seq2SeqTrainingArguments, TrainerCallback
@@ -38,28 +43,25 @@ def run_ppo(
     finetuning_args: "FinetuningArguments",
     generating_args: "GeneratingArguments",
     callbacks: Optional[list["TrainerCallback"]] = None,
+    *,
+    workload_file: str = "",
 ):
     tokenizer_module = load_tokenizer(model_args)
     tokenizer = tokenizer_module["tokenizer"]
-    template = get_template_and_fix_tokenizer(tokenizer, data_args)
     from lmf_hooks.model import hook_tokenizer
 
     tokenizer = hook_tokenizer(tokenizer)
-    dataset_module = get_dataset(template, model_args, data_args, training_args, stage="ppo", **tokenizer_module)
+    assert isinstance(tokenizer.pad_token_id, int)
+
     model = load_model(tokenizer, model_args, finetuning_args, training_args.do_train, add_valuehead=True)
 
     from lmf_hooks.model import hook_rl_model
 
     model = hook_rl_model(model)
 
-    # from index_advisor.logging import logger
-
-    # logger = logger.getChild("ppo.workflow")
-    # logger.debug(f"{model=}")
-    # logger.debug(f"{model.pretrained_model=}")
+    dataset = CustomDataset(workload_file, tokenizer, config(), generate=True)
 
     tokenizer.padding_side = "left"  # use left-padding in generation while using right-padding in training
-    data_collator = MultiModalDataCollatorForSeq2Seq(template=template, model=model, **tokenizer_module)
 
     # Create reference model and reward model
     ref_model = create_ref_model(model_args, finetuning_args, add_valuehead=True)
@@ -75,8 +77,9 @@ def run_ppo(
         model=model,
         reward_model=reward_model,
         ref_model=ref_model,
-        data_collator=data_collator,
-        **dataset_module,
+        data_collator=new_collator_rl(tokenizer.pad_token_id),
+        training_data_collator=new_collator_rl(tokenizer.pad_token_id, padding_side="right"),
+        train_dataset=dataset,
         **tokenizer_module,
     )
 
