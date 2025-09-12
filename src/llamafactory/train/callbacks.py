@@ -295,6 +295,8 @@ class LogCallback(TrainerCallback):
             elapsed_time=self.elapsed_time,
             remaining_time=self.remaining_time,
         )
+        if r := state.log_history[-1].get("eval_reward"):
+            logs["eval_reward"] = r
         if state.num_input_tokens_seen:
             logs["throughput"] = round(state.num_input_tokens_seen / (time.time() - self.start_time), 2)
             logs["total_tokens"] = state.num_input_tokens_seen

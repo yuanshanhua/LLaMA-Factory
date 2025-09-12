@@ -15,9 +15,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from typing import TYPE_CHECKING, Optional
 
 from lmf_hooks.model import config, logger
+from torch.utils.data import random_split
 
 from scripts.sft_projector import CustomDataset, new_collator_rl
 
@@ -45,6 +47,9 @@ def run_ppo(
     callbacks: Optional[list["TrainerCallback"]] = None,
     *,
     workload_file: str = "",
+    eval_data_file: Optional[str] = None,
+    eval_set_percent: float = 0.0,
+    eval_batch_size: int = 16,
 ):
     tokenizer_module = load_tokenizer(model_args)
     tokenizer = tokenizer_module["tokenizer"]
@@ -60,6 +65,13 @@ def run_ppo(
     model = hook_rl_model(model)
 
     dataset = CustomDataset(workload_file, tokenizer, config(), generate=True)
+    eval_dataset = None
+    if eval_set_percent > 0:
+        eval_size = int(len(dataset) * eval_set_percent)
+        train_size = len(dataset) - eval_size
+        dataset, eval_dataset = random_split(dataset, [train_size, eval_size])
+    elif eval_data_file and os.path.exists(eval_data_file):
+        eval_dataset = CustomDataset(eval_data_file, tokenizer, config())
 
     tokenizer.padding_side = "left"  # use left-padding in generation while using right-padding in training
 
@@ -80,6 +92,8 @@ def run_ppo(
         data_collator=new_collator_rl(tokenizer.pad_token_id),
         training_data_collator=new_collator_rl(tokenizer.pad_token_id, padding_side="right"),
         train_dataset=dataset,
+        eval_dataset=eval_dataset,
+        eval_batch_size=eval_batch_size,
         **tokenizer_module,
     )
 

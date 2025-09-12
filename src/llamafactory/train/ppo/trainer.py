@@ -25,8 +25,10 @@ from typing import TYPE_CHECKING, Any, Callable, Optional
 import torch
 from accelerate.utils import DistributedDataParallelKwargs
 from index_advisor.ia_logging import logger as ia_logger
+from index_advisor.mm.model import DATASET_COLUMNS, DATASET_SQLS
 from lmf_hooks.reward import get_reward
 from safetensors.torch import save_file
+from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 from transformers import GenerationConfig, Trainer, TrainerControl, TrainerState
 from transformers.optimization import get_scheduler
@@ -85,10 +87,8 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
         training_data_collator: Callable,
         train_dataset: Optional["Dataset"] = None,
         eval_dataset: Optional["Dataset"] = None,
+        eval_batch_size: int = 16,
     ) -> None:
-        if eval_dataset is not None:
-            raise NotImplementedError("PPOTrainer does not support eval dataset yet.")
-
         backward_batch_size = training_args.per_device_train_batch_size * training_args.gradient_accumulation_steps
         ppo_config = PPOConfig(
             model_name=model_args.model_name_or_path,
@@ -193,6 +193,11 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
             self.accelerator.clip_grad_norm_ = MethodType(clip_grad_norm_old_version, self.accelerator)
             self.add_callback(BAdamCallback)
 
+        # eval dataset
+        self.eval_collator = data_collator
+        self.eval_dataset = eval_dataset
+        self.eval_batch_size = eval_batch_size
+
     def ppo_train(self, resume_from_checkpoint: Optional[str] = None) -> None:
         r"""Implement training loop for the PPO stage, like _inner_training_loop() in Huggingface's Trainer."""
         if resume_from_checkpoint is not None:
@@ -238,6 +243,12 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
         reward_meter = AverageMeter()
         self.callback_handler.on_train_begin(self.args, self.state, self.control)
 
+        # 1. 首先在 train dataset 上进行一次 eval, 耗时较长
+        # eval_reward = self.evaluate_(self.dataset)
+        # logs = dict(eval_reward=eval_reward, epoch=0)
+        # self.state.log_history.append(logs)
+        # self.callback_handler.on_log(self.args, self.state, self.control, logs)
+
         for step in tqdm(range(max_steps), disable=not self.is_local_process_zero()):
             try:
                 batch = next(dataiter)
@@ -256,8 +267,10 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
                     "input_ids": batch["input_ids"][idx : idx + self.config.mini_batch_size],
                     "attention_mask": batch["attention_mask"][idx : idx + self.config.mini_batch_size],
                 }
-                if "columns" in batch:
-                    mini_batch["columns"] = batch["columns"][idx : idx + self.config.mini_batch_size]
+                if DATASET_COLUMNS in batch:
+                    mini_batch[DATASET_COLUMNS] = batch[DATASET_COLUMNS][idx : idx + self.config.mini_batch_size]
+                if DATASET_SQLS in batch:
+                    mini_batch[DATASET_SQLS] = batch[DATASET_SQLS][idx : idx + self.config.mini_batch_size]
                 mini_batch_queries, mini_batch_responses, mini_batch_columns, mini_batch_sqls = self.get_inputs(
                     mini_batch
                 )
@@ -313,6 +326,11 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
                 reward_meter.reset()
 
             if (step + 1) % self.args.save_steps == 0:  # save checkpoint
+                # eval checkpoint
+                eval_reward = self.evaluate_(self.eval_dataset)
+                logs = dict(eval_reward=eval_reward, epoch=round(step / steps_in_epoch, 2))
+                self.state.log_history.append(logs)
+                self.callback_handler.on_log(self.args, self.state, self.control, logs)
                 self.save_model(
                     os.path.join(self.args.output_dir, f"{PREFIX_CHECKPOINT_DIR}-{self.state.global_step}")
                 )
@@ -322,6 +340,28 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
                 break
 
         self.callback_handler.on_train_end(self.args, self.state, self.control)
+
+    def evaluate_(self, eval_dataset: Dataset | None) -> float:
+        if not eval_dataset:
+            return 0
+        if not self.eval_batch_size:
+            self.eval_batch_size = self.config.mini_batch_size
+        dataloader = DataLoader(
+            eval_dataset,
+            batch_size=self.eval_batch_size,
+            shuffle=False,
+            collate_fn=self.eval_collator,
+        )
+        reward_meter = AverageMeter()
+        self.model.eval()
+        for batch in dataloader:
+            for k, v in batch.items():
+                batch[k] = v.to(self.current_device)
+            queries, responses, _, _ = self.get_inputs(batch)
+            rewards = self.get_rewards(queries, responses)
+            reward_meter.update(torch.stack(rewards).mean().item(), n=len(rewards))
+        self.model.train()
+        return round(reward_meter.avg, 4)
 
     @override
     def create_optimizer(
@@ -377,19 +417,19 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
                             param_groups.append(
                                 {"params": [param], "lr": projector_lr, "weight_decay": training_args.weight_decay}
                             )
-                            mylogger.debug(f"添加 projector decay 参数组: {name} {param.size()}")
+                            # mylogger.debug(f"添加 projector decay 参数组: {name} {param.size()}")
                         else:
                             param_groups.append({"params": [param], "lr": projector_lr, "weight_decay": 0.0})
-                            mylogger.debug(f"添加 projector 参数组: {name} {param.size()}")
+                            # mylogger.debug(f"添加 projector 参数组: {name} {param.size()}")
                     else:
                         if name in decay_param_names:
                             param_groups.append(
                                 {"params": [param], "lr": lm_lr, "weight_decay": training_args.weight_decay}
                             )
-                            mylogger.debug(f"添加 lm decay 参数组: {name} {param.size()}")
+                            # mylogger.debug(f"添加 lm decay 参数组: {name} {param.size()}")
                         else:
                             param_groups.append({"params": [param], "lr": lm_lr, "weight_decay": 0.0})
-                            mylogger.debug(f"添加 lm 参数组: {name} {param.size()}")
+                            # mylogger.debug(f"添加 lm 参数组: {name} {param.size()}")
             else:
                 # 原有逻辑，适用于标准模型
                 param_groups = [
