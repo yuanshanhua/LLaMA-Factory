@@ -18,6 +18,7 @@
 import os
 from typing import TYPE_CHECKING, Optional
 
+import torch
 from lmf_hooks.model import config, logger
 from torch.utils.data import random_split
 
@@ -69,7 +70,8 @@ def run_ppo(
     if eval_set_percent > 0:
         eval_size = int(len(dataset) * eval_set_percent)
         train_size = len(dataset) - eval_size
-        dataset, eval_dataset = random_split(dataset, [train_size, eval_size])
+        g = torch.Generator().manual_seed(0)
+        dataset, eval_dataset = random_split(dataset, [train_size, eval_size], g)
     elif eval_data_file and os.path.exists(eval_data_file):
         eval_dataset = CustomDataset(eval_data_file, tokenizer, config())
 
