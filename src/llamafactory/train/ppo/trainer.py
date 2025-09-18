@@ -459,10 +459,10 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
         self, batch: dict[str, "torch.Tensor"]
     ) -> tuple[list["torch.Tensor"], list["torch.Tensor"], list["torch.Tensor"], list["torch.Tensor"]]:
         r"""Generate model's responses given queries."""
-        if batch["input_ids"].size(0) == 1:  # handle llama2 ppo with gradient accumulation > 1
-            start_index = (batch["input_ids"][0] != self.tokenizer.pad_token_id).nonzero()[0].item()
-            for k, v in batch.items():
-                batch[k] = v[:, start_index:]
+        # if batch["input_ids"].size(0) == 1:  # handle llama2 ppo with gradient accumulation > 1
+        #     start_index = (batch["input_ids"][0] != self.tokenizer.pad_token_id).nonzero()[0].item()
+        #     for k, v in batch.items():
+        #         batch[k] = v[:, start_index:]
 
         with unwrap_model_for_generation(self.model, self.accelerator) as unwrapped_model:
             unwrapped_model: AutoModelForCausalLMWithValueHead = self.accelerator.unwrap_model(self.model)
