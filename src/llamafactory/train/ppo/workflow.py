@@ -51,6 +51,7 @@ def run_ppo(
     eval_data_file: Optional[str] = None,
     eval_set_percent: float = 0.0,
     eval_batch_size: int = 16,
+    gen_batch_size: Optional[int] = None,
 ):
     tokenizer_module = load_tokenizer(model_args)
     tokenizer = tokenizer_module["tokenizer"]
@@ -96,6 +97,7 @@ def run_ppo(
         train_dataset=dataset,
         eval_dataset=eval_dataset,
         eval_batch_size=eval_batch_size,
+        gen_batch_size=gen_batch_size,
         **tokenizer_module,
     )
 

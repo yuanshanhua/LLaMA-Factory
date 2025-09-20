@@ -289,14 +289,23 @@ class LogCallback(TrainerCallback):
             predict_loss=state.log_history[-1].get("predict_loss"),
             reward=state.log_history[-1].get("reward"),
             accuracy=state.log_history[-1].get("rewards/accuracies"),
-            lr=state.log_history[-1].get("learning_rate"),
+            lr=f"{lr:.2e}" if (lr := state.log_history[-1].get("learning_rate")) is not None else None,
             epoch=state.log_history[-1].get("epoch"),
             percentage=round(self.cur_steps / self.max_steps * 100, 2) if self.max_steps != 0 else 100,
             elapsed_time=self.elapsed_time,
             remaining_time=self.remaining_time,
         )
-        if r := state.log_history[-1].get("eval_reward"):
-            logs["eval_reward"] = r
+        for k in state.log_history[-1]:
+            if k not in (
+                "loss",
+                "eval_loss",
+                "predict_loss",
+                "reward",
+                "rewards/accuracies",
+                "learning_rate",
+                "epoch",
+            ):
+                logs[k] = state.log_history[-1][k]
         if state.num_input_tokens_seen:
             logs["throughput"] = round(state.num_input_tokens_seen / (time.time() - self.start_time), 2)
             logs["total_tokens"] = state.num_input_tokens_seen

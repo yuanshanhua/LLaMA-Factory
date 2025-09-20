@@ -18,6 +18,7 @@
 import math
 import os
 import sys
+import time
 import warnings
 from types import MethodType
 from typing import TYPE_CHECKING, Any, Callable, Optional
@@ -88,8 +89,15 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
         train_dataset: Optional["Dataset"] = None,
         eval_dataset: Optional["Dataset"] = None,
         eval_batch_size: int = 16,
+        gen_batch_size: Optional[int] = None,
     ) -> None:
         backward_batch_size = training_args.per_device_train_batch_size * training_args.gradient_accumulation_steps
+        if gen_batch_size is None:
+            gen_batch_size = training_args.per_device_train_batch_size
+        assert (
+            backward_batch_size * finetuning_args.ppo_buffer_size
+        ) % gen_batch_size == 0, "gen_batch_size 必须能够整除 ppo batch_size"
+        self.gen_batch_size = gen_batch_size
         ppo_config = PPOConfig(
             model_name=model_args.model_name_or_path,
             learning_rate=training_args.learning_rate,
@@ -151,6 +159,8 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
         self.finetuning_args = finetuning_args
         self.reward_model = reward_model
         self.current_device = get_current_device()  # patch for deepspeed training
+
+        self.tokenizer = self.processing_class  # 避免打印 Trainer.tokenizer is now deprecated. 警告
 
         self.generation_config = GenerationConfig(
             pad_token_id=self.tokenizer.pad_token_id,
@@ -237,10 +247,18 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
         logger.info_rank0(f"  Num optimization epochs per batch = {self.finetuning_args.ppo_epochs:,}")
         logger.info_rank0(f"  Total training steps = {max_steps:,}")
         logger.info_rank0(f"  Number of trainable parameters = {count_parameters(self.model)[0]:,}")
+        mylogger.info(f"  生成 batch size = {self.gen_batch_size:,}")
+        mylogger.info(f"  PPO epochs = {self.config.ppo_epochs:,}")
+        mylogger.info(f"  PPO batch size = {self.config.batch_size:,}")
+        mylogger.info(f"  PPO backward batch size = {self.config.backward_batch_size:,}")
+        mylogger.info(f"  PPO mini batch size = {self.config.mini_batch_size:,}")
 
         dataiter = iter(self.dataloader)
         loss_meter = AverageMeter()
         reward_meter = AverageMeter()
+        gen_time_meter = AverageMeter()
+        ppo_time_meter = AverageMeter()
+        eval_time_meter = AverageMeter()
         self.callback_handler.on_train_begin(self.args, self.state, self.control)
 
         # 1. 首先在 train dataset 上进行一次 eval, 耗时较长
@@ -262,15 +280,16 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
             queries, responses, rewards = [], [], []
             columns: list[torch.Tensor] = []
             sqls: list[torch.Tensor] = []
-            for idx in range(0, self.config.batch_size, self.config.mini_batch_size):
+            t = time.time()
+            for idx in range(0, self.config.batch_size, self.gen_batch_size):
                 mini_batch = {
-                    "input_ids": batch["input_ids"][idx : idx + self.config.mini_batch_size],
-                    "attention_mask": batch["attention_mask"][idx : idx + self.config.mini_batch_size],
+                    "input_ids": batch["input_ids"][idx : idx + self.gen_batch_size],
+                    "attention_mask": batch["attention_mask"][idx : idx + self.gen_batch_size],
                 }
                 if DATASET_COLUMNS in batch:
-                    mini_batch[DATASET_COLUMNS] = batch[DATASET_COLUMNS][idx : idx + self.config.mini_batch_size]
+                    mini_batch[DATASET_COLUMNS] = batch[DATASET_COLUMNS][idx : idx + self.gen_batch_size]
                 if DATASET_SQLS in batch:
-                    mini_batch[DATASET_SQLS] = batch[DATASET_SQLS][idx : idx + self.config.mini_batch_size]
+                    mini_batch[DATASET_SQLS] = batch[DATASET_SQLS][idx : idx + self.gen_batch_size]
                 mini_batch_queries, mini_batch_responses, mini_batch_columns, mini_batch_sqls = self.get_inputs(
                     mini_batch
                 )
@@ -282,6 +301,9 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
                     columns.extend(mini_batch_columns)
                 if mini_batch_sqls:
                     sqls.extend(mini_batch_sqls)
+
+            gen_time_meter.update((time.time()-t)/len(queries), n=len(queries))
+            mylogger.info(f"batch 生成和 reward 耗时: {time.time()-t:.2f}s, 平均每样本 {(time.time()-t)/len(queries):.2f}s, 历史平均 {gen_time_meter.avg:.2f}s")
 
             if columns:
                 self._cached_columns = columns
@@ -295,7 +317,10 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
             # Run PPO step
             self.model.train()
             # print(self.is_distributed)
+            t = time.time()
             stats = self.step(queries, responses, rewards)
+            ppo_time_meter.update((time.time()-t)/len(queries), n=len(queries))
+            mylogger.info(f"batch PPO step 耗时: {time.time()-t:.2f}s, 平均每样本 {(time.time()-t)/len(queries):.2f}s, 历史平均 {ppo_time_meter.avg:.2f}s")
             self.tokenizer.padding_side = "left"  # restore padding side
             loss_meter.update(float(stats["ppo/loss/total"]), n=len(rewards))
             reward_meter.update(torch.stack(rewards).mean().item(), n=len(rewards))
@@ -317,6 +342,8 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
                     reward=round(reward_meter.avg, 4),
                     learning_rate=stats["ppo/learning_rate"],
                     epoch=round(step / steps_in_epoch, 2),
+                    kl=stats["objective/kl"],
+                    kl_coef=stats["objective/kl_coef"],
                 )
                 tqdm.write(str(logs))
                 logs["step"] = step
@@ -327,7 +354,10 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
 
             if (step + 1) % self.args.save_steps == 0:  # save checkpoint
                 # eval checkpoint
+                t = time.time()
                 eval_reward = self.evaluate_(self.eval_dataset)
+                eval_time_meter.update(time.time() - t)
+                mylogger.debug(f"eval 耗时: {time.time()-t:.2f}s, 历史平均 {eval_time_meter.avg:.2f}s")
                 logs = dict(eval_reward=eval_reward, epoch=round(step / steps_in_epoch, 2))
                 self.state.log_history.append(logs)
                 self.callback_handler.on_log(self.args, self.state, self.control, logs)
@@ -354,7 +384,7 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
         )
         reward_meter = AverageMeter()
         self.model.eval()
-        for batch in dataloader:
+        for batch in tqdm(dataloader, desc="Evaluating", disable=not self.is_local_process_zero()):
             for k, v in batch.items():
                 batch[k] = v.to(self.current_device)
             queries, responses, _, _ = self.get_inputs(batch)
