@@ -289,7 +289,7 @@ class LogCallback(TrainerCallback):
             predict_loss=state.log_history[-1].get("predict_loss"),
             reward=state.log_history[-1].get("reward"),
             accuracy=state.log_history[-1].get("rewards/accuracies"),
-            lr=f"{lr:.2e}" if (lr := state.log_history[-1].get("learning_rate")) is not None else None,
+            lr=state.log_history[-1].get("learning_rate"),
             epoch=state.log_history[-1].get("epoch"),
             percentage=round(self.cur_steps / self.max_steps * 100, 2) if self.max_steps != 0 else 100,
             elapsed_time=self.elapsed_time,
