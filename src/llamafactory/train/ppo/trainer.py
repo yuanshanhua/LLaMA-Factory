@@ -90,13 +90,21 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
         eval_dataset: Optional["Dataset"] = None,
         eval_batch_size: int = 16,
         gen_batch_size: Optional[int] = None,
+        # Optional PPOConfig overrides
+        ppo_adap_kl_ctrl: Optional[bool] = None,
+        ppo_init_kl_coef: Optional[float] = None,
+        ppo_kl_penalty: Optional[str] = None,
+        ppo_target: Optional[float] = None,
+        ppo_horizon: Optional[float] = None,
+        ppo_early_stopping: Optional[bool] = None,
+        ppo_target_kl: Optional[float] = None,
     ) -> None:
         backward_batch_size = training_args.per_device_train_batch_size * training_args.gradient_accumulation_steps
         if gen_batch_size is None:
             gen_batch_size = training_args.per_device_train_batch_size
-        assert (
-            backward_batch_size * finetuning_args.ppo_buffer_size
-        ) % gen_batch_size == 0, "gen_batch_size 必须能够整除 ppo batch_size"
+        assert (backward_batch_size * finetuning_args.ppo_buffer_size) % gen_batch_size == 0, (
+            "gen_batch_size 必须能够整除 ppo batch_size"
+        )
         self.gen_batch_size = gen_batch_size
         ppo_config = PPOConfig(
             model_name=model_args.model_name_or_path,
@@ -118,6 +126,22 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
             # 避免移除 columns 列. PPOTrainer 会根据 model.forward 的参数移除列, 但 PPO 看到的 model 是 AutoModelForCausalLMWithValueHead
             remove_unused_columns=False,
         )
+
+        # Apply optional overrides to PPOConfig if provided via CLI
+        if ppo_adap_kl_ctrl is not None:
+            ppo_config.adap_kl_ctrl = ppo_adap_kl_ctrl
+        if ppo_init_kl_coef is not None:
+            ppo_config.init_kl_coef = ppo_init_kl_coef
+        if ppo_kl_penalty is not None:
+            ppo_config.kl_penalty = ppo_kl_penalty  # type: ignore[assignment]
+        if ppo_target is not None:
+            ppo_config.target = ppo_target
+        if ppo_horizon is not None:
+            ppo_config.horizon = ppo_horizon
+        if ppo_early_stopping is not None:
+            ppo_config.early_stopping = ppo_early_stopping
+        if ppo_target_kl is not None:
+            ppo_config.target_kl = ppo_target_kl
 
         # Add deepspeed config
         if training_args.deepspeed_plugin is not None:
@@ -302,8 +326,10 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
                 if mini_batch_sqls:
                     sqls.extend(mini_batch_sqls)
 
-            gen_time_meter.update((time.time()-t)/len(queries), n=len(queries))
-            mylogger.info(f"batch 生成和 reward 耗时: {time.time()-t:.2f}s, 平均每样本 {(time.time()-t)/len(queries):.2f}s, 历史平均 {gen_time_meter.avg:.2f}s")
+            gen_time_meter.update((time.time() - t) / len(queries), n=len(queries))
+            mylogger.info(
+                f"batch 生成和 reward 耗时: {time.time() - t:.2f}s, 平均每样本 {(time.time() - t) / len(queries):.2f}s, 历史平均 {gen_time_meter.avg:.2f}s"
+            )
 
             if columns:
                 self._cached_columns = columns
@@ -319,8 +345,10 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
             # print(self.is_distributed)
             t = time.time()
             stats = self.step(queries, responses, rewards)
-            ppo_time_meter.update((time.time()-t)/len(queries), n=len(queries))
-            mylogger.info(f"batch PPO step 耗时: {time.time()-t:.2f}s, 平均每样本 {(time.time()-t)/len(queries):.2f}s, 历史平均 {ppo_time_meter.avg:.2f}s")
+            ppo_time_meter.update((time.time() - t) / len(queries), n=len(queries))
+            mylogger.info(
+                f"batch PPO step 耗时: {time.time() - t:.2f}s, 平均每样本 {(time.time() - t) / len(queries):.2f}s, 历史平均 {ppo_time_meter.avg:.2f}s"
+            )
             self.tokenizer.padding_side = "left"  # restore padding side
             loss_meter.update(float(stats["ppo/loss/total"]), n=len(rewards))
             reward_meter.update(torch.stack(rewards).mean().item(), n=len(rewards))
@@ -357,7 +385,7 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
                 t = time.time()
                 eval_reward = self.evaluate_(self.eval_dataset)
                 eval_time_meter.update(time.time() - t)
-                mylogger.debug(f"eval 耗时: {time.time()-t:.2f}s, 历史平均 {eval_time_meter.avg:.2f}s")
+                mylogger.debug(f"eval 耗时: {time.time() - t:.2f}s, 历史平均 {eval_time_meter.avg:.2f}s")
                 logs = dict(eval_reward=eval_reward, epoch=round(step / steps_in_epoch, 2))
                 self.state.log_history.append(logs)
                 self.callback_handler.on_log(self.args, self.state, self.control, logs)

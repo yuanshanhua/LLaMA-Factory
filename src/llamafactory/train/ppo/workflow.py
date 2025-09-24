@@ -52,6 +52,14 @@ def run_ppo(
     eval_set_percent: float = 0.0,
     eval_batch_size: int = 16,
     gen_batch_size: Optional[int] = None,
+    # Optional PPOConfig overrides
+    ppo_adap_kl_ctrl: Optional[bool] = None,
+    ppo_init_kl_coef: Optional[float] = None,
+    ppo_kl_penalty: Optional[str] = None,
+    ppo_target: Optional[float] = None,
+    ppo_horizon: Optional[float] = None,
+    ppo_early_stopping: Optional[bool] = None,
+    ppo_target_kl: Optional[float] = None,
 ):
     tokenizer_module = load_tokenizer(model_args)
     tokenizer = tokenizer_module["tokenizer"]
@@ -98,6 +106,13 @@ def run_ppo(
         eval_dataset=eval_dataset,
         eval_batch_size=eval_batch_size,
         gen_batch_size=gen_batch_size,
+        ppo_adap_kl_ctrl=ppo_adap_kl_ctrl,
+        ppo_init_kl_coef=ppo_init_kl_coef,
+        ppo_kl_penalty=ppo_kl_penalty,
+        ppo_target=ppo_target,
+        ppo_horizon=ppo_horizon,
+        ppo_early_stopping=ppo_early_stopping,
+        ppo_target_kl=ppo_target_kl,
         **tokenizer_module,
     )
 
