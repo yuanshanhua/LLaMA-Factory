@@ -23,6 +23,7 @@ import warnings
 from types import MethodType
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
+import numpy as np  # added for percentile/statistics of ratios & advantages
 import torch
 from accelerate.utils import DistributedDataParallelKwargs
 from index_advisor.ia_logging import logger as ia_logger
@@ -365,16 +366,28 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
             self.callback_handler.on_step_end(self.args, self.state, self.control)
 
             if self.is_local_process_zero() and (step + 1) % self.args.logging_steps == 0:
-                logs = dict(
-                    loss=round(loss_meter.avg, 4),
-                    reward=round(reward_meter.avg, 4),
-                    learning_rate=stats["ppo/learning_rate"],
-                    epoch=round(step / steps_in_epoch, 2),
-                    kl=stats["objective/kl"],
-                    kl_coef=stats["objective/kl_coef"],
+                logs = self._build_extended_logs(stats, loss_meter, reward_meter, step, steps_in_epoch)
+                tqdm.write(
+                    str(
+                        {
+                            k: round(v, 4) if isinstance(v, (int, float)) and np.isfinite(v) else v
+                            for k, v in logs.items()
+                            if k
+                            in [
+                                "loss",
+                                "reward",
+                                "kl",
+                                "kl_coef",
+                                "policy_loss",
+                                "value_loss",
+                                "ratio_mean",
+                                "ratio_p95",
+                                "ratio_outside_clip",
+                                "advantage_std",
+                            ]
+                        }
+                    )
                 )
-                tqdm.write(str(logs))
-                logs["step"] = step
                 self.state.log_history.append(logs)
                 self.callback_handler.on_log(self.args, self.state, self.control, logs)
                 loss_meter.reset()
@@ -398,6 +411,108 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
                 break
 
         self.callback_handler.on_train_end(self.args, self.state, self.control)
+
+    # ---------------------------------------------------------------------
+    def _build_extended_logs(
+        self,
+        stats: dict[str, Any],
+        loss_meter: "AverageMeter",
+        reward_meter: "AverageMeter",
+        step: int,
+        steps_in_epoch: int,
+    ) -> dict[str, float]:
+        def _to_np(x):  # local helper
+            if isinstance(x, np.ndarray):
+                return x
+            if hasattr(x, "cpu"):
+                try:
+                    return x.detach().cpu().numpy()
+                except Exception:
+                    return np.array([float(x)])
+            try:
+                return np.array(x)
+            except Exception:
+                return np.array([np.nan])
+
+        def pct(a: np.ndarray, q: float) -> float:
+            if a.size == 0:
+                return float("nan")
+            return float(np.percentile(a, q))
+
+        ratio_arr = _to_np(stats.get("ppo/policy/ratio"))
+        if ratio_arr.ndim > 1:
+            ratio_arr = ratio_arr.flatten()
+        ratio_arr = ratio_arr[np.isfinite(ratio_arr)] if ratio_arr.size else ratio_arr
+
+        advantages_arr = _to_np(stats.get("ppo/policy/advantages"))
+        if advantages_arr.ndim > 1:
+            advantages_arr = advantages_arr.flatten()
+        advantages_arr = advantages_arr[np.isfinite(advantages_arr)] if advantages_arr.size else advantages_arr
+
+        policy_loss = stats.get("ppo/loss/policy", float("nan"))
+        value_loss = stats.get("ppo/loss/value", float("nan"))
+        total_loss = stats.get("ppo/loss/total", float("nan"))
+        entropy = stats.get("ppo/policy/entropy", float("nan"))
+        approx_kl = stats.get("ppo/policy/approxkl", float("nan"))
+        policy_kl = stats.get("ppo/policy/policykl", float("nan"))
+        clipfrac = stats.get("ppo/policy/clipfrac", float("nan"))
+        v_clipfrac = stats.get("ppo/val/clipfrac", float("nan"))
+        val_error = stats.get("ppo/val/error", float("nan"))
+        val_mean = stats.get("ppo/val/mean", float("nan"))
+        returns_var = stats.get("ppo/returns/var", float("nan"))
+        val_var_explained = stats.get("ppo/val/var_explained", float("nan"))
+
+        ratio_mean = float(np.mean(ratio_arr)) if ratio_arr.size else float("nan")
+        ratio_std = float(np.std(ratio_arr)) if ratio_arr.size else float("nan")
+        ratio_p95 = pct(ratio_arr, 95) if ratio_arr.size else float("nan")
+        ratio_p99 = pct(ratio_arr, 99) if ratio_arr.size else float("nan")
+        ratio_max = float(np.max(ratio_arr)) if ratio_arr.size else float("nan")
+        ratio_min = float(np.min(ratio_arr)) if ratio_arr.size else float("nan")
+        cliprange = getattr(self.config, "cliprange", 0.2)
+        ratio_outside = (
+            float(((ratio_arr > (1 + cliprange)) | (ratio_arr < (1 - cliprange))).mean())
+            if ratio_arr.size
+            else float("nan")
+        )
+
+        adv_mean = float(np.mean(advantages_arr)) if advantages_arr.size else float("nan")
+        adv_std = float(np.std(advantages_arr)) if advantages_arr.size else float("nan")
+        adv_p95 = pct(advantages_arr, 95) if advantages_arr.size else float("nan")
+        adv_p99 = pct(advantages_arr, 99) if advantages_arr.size else float("nan")
+
+        logs = dict(
+            policy_loss=float(policy_loss),
+            value_loss=float(value_loss),
+            total_loss=float(total_loss),
+            loss=round(loss_meter.avg, 4),
+            reward=round(reward_meter.avg, 4),
+            learning_rate=stats.get("ppo/learning_rate", float("nan")),
+            epoch=round(step / steps_in_epoch, 2),
+            kl=stats.get("objective/kl", float("nan")),
+            kl_coef=stats.get("objective/kl_coef", float("nan")),
+            entropy=float(entropy),
+            approx_kl=float(approx_kl),
+            policy_kl=float(policy_kl),
+            clipfrac=float(clipfrac),
+            v_clipfrac=float(v_clipfrac),
+            val_error=float(val_error),
+            val_mean=float(val_mean),
+            returns_var=float(returns_var),
+            val_var_explained=float(val_var_explained),
+            ratio_mean=ratio_mean,
+            ratio_std=ratio_std,
+            ratio_p95=ratio_p95,
+            ratio_p99=ratio_p99,
+            ratio_min=ratio_min,
+            ratio_max=ratio_max,
+            ratio_outside_clip=ratio_outside,
+            advantage_mean=adv_mean,
+            advantage_std=adv_std,
+            advantage_p95=adv_p95,
+            advantage_p99=adv_p99,
+        )
+        logs["step"] = step
+        return logs
 
     def evaluate_(self, eval_dataset: Dataset | None) -> float:
         if not eval_dataset:
