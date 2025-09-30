@@ -40,7 +40,7 @@ from transformers.trainer_pt_utils import remove_dummy_checkpoint
 from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
 from transformers.utils import SAFE_WEIGHTS_NAME, WEIGHTS_NAME
 from trl import PPOConfig, PPOTrainer
-from trl.core import PPODecorators, logprobs_from_logits
+from trl.core import PPODecorators, logprobs_from_logits, masked_mean
 from trl.models.utils import unwrap_model_for_generation
 from typing_extensions import override
 
@@ -345,6 +345,7 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
             self.model.train()
             # print(self.is_distributed)
             t = time.time()
+            self.step_avg_ratios = []  # 用于记录此 step 中所有 mini batch 的 avg_ratio
             stats = self.step(queries, responses, rewards)
             ppo_time_meter.update((time.time() - t) / len(queries), n=len(queries))
             mylogger.info(
@@ -439,11 +440,6 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
                 return float("nan")
             return float(np.percentile(a, q))
 
-        ratio_arr = _to_np(stats.get("ppo/policy/ratio"))
-        if ratio_arr.ndim > 1:
-            ratio_arr = ratio_arr.flatten()
-        ratio_arr = ratio_arr[np.isfinite(ratio_arr)] if ratio_arr.size else ratio_arr
-
         advantages_arr = _to_np(stats.get("ppo/policy/advantages"))
         if advantages_arr.ndim > 1:
             advantages_arr = advantages_arr.flatten()
@@ -462,23 +458,14 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
         returns_var = stats.get("ppo/returns/var", float("nan"))
         val_var_explained = stats.get("ppo/val/var_explained", float("nan"))
 
-        ratio_mean = float(np.mean(ratio_arr)) if ratio_arr.size else float("nan")
-        ratio_std = float(np.std(ratio_arr)) if ratio_arr.size else float("nan")
-        ratio_p95 = pct(ratio_arr, 95) if ratio_arr.size else float("nan")
-        ratio_p99 = pct(ratio_arr, 99) if ratio_arr.size else float("nan")
-        ratio_max = float(np.max(ratio_arr)) if ratio_arr.size else float("nan")
-        ratio_min = float(np.min(ratio_arr)) if ratio_arr.size else float("nan")
-        cliprange = getattr(self.config, "cliprange", 0.2)
-        ratio_outside = (
-            float(((ratio_arr > (1 + cliprange)) | (ratio_arr < (1 - cliprange))).mean())
-            if ratio_arr.size
-            else float("nan")
-        )
-
         adv_mean = float(np.mean(advantages_arr)) if advantages_arr.size else float("nan")
         adv_std = float(np.std(advantages_arr)) if advantages_arr.size else float("nan")
         adv_p95 = pct(advantages_arr, 95) if advantages_arr.size else float("nan")
         adv_p99 = pct(advantages_arr, 99) if advantages_arr.size else float("nan")
+
+        avg_ratio_mean = float(np.mean(self.step_avg_ratios))
+        avg_ratio_min = float(np.min(self.step_avg_ratios))
+        avg_ratio_max = float(np.max(self.step_avg_ratios))
 
         logs = dict(
             policy_loss=float(policy_loss),
@@ -499,13 +486,9 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
             val_mean=float(val_mean),
             returns_var=float(returns_var),
             val_var_explained=float(val_var_explained),
-            ratio_mean=ratio_mean,
-            ratio_std=ratio_std,
-            ratio_p95=ratio_p95,
-            ratio_p99=ratio_p99,
-            ratio_min=ratio_min,
-            ratio_max=ratio_max,
-            ratio_outside_clip=ratio_outside,
+            avg_ratio_mean=avg_ratio_mean,
+            avg_ratio_min=avg_ratio_min,
+            avg_ratio_max=avg_ratio_max,
             advantage_mean=adv_mean,
             advantage_std=adv_std,
             advantage_p95=adv_p95,
@@ -871,3 +854,28 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
                 os.path.join(output_dir, "projector.safetensors"),
                 metadata={"format": "pt"},
             )
+
+    def loss(
+        self,
+        old_logprobs: torch.FloatTensor,
+        values: torch.FloatTensor,
+        logits: torch.FloatTensor,
+        vpreds: torch.FloatTensor,
+        logprobs: torch.FloatTensor,
+        mask: torch.LongTensor,
+        advantages: torch.FloatTensor,
+        returns: torch.FloatTensor,
+    ):
+        ratio = torch.exp(logprobs - old_logprobs)
+        avg_ratio = masked_mean(ratio, mask).item()
+        self.step_avg_ratios.append(avg_ratio)
+        return super().loss(
+            old_logprobs=old_logprobs,
+            values=values,
+            logits=logits,
+            vpreds=vpreds,
+            logprobs=logprobs,
+            mask=mask,
+            advantages=advantages,
+            returns=returns,
+        )
