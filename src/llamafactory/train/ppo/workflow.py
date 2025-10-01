@@ -20,9 +20,8 @@ from typing import TYPE_CHECKING, Optional
 
 import torch
 from lmf_hooks.model import config, logger
-from torch.utils.data import random_split
-
 from scripts.sft_projector import CustomDataset, new_collator_rl
+from torch.utils.data import random_split
 
 from ...extras.ploting import plot_loss
 from ...model import load_model, load_tokenizer
@@ -60,6 +59,7 @@ def run_ppo(
     ppo_horizon: Optional[float] = None,
     ppo_early_stopping: Optional[bool] = None,
     ppo_target_kl: Optional[float] = None,
+    ppo_ratio_threshold: Optional[float] = None,
 ):
     tokenizer_module = load_tokenizer(model_args)
     tokenizer = tokenizer_module["tokenizer"]
@@ -113,6 +113,7 @@ def run_ppo(
         ppo_horizon=ppo_horizon,
         ppo_early_stopping=ppo_early_stopping,
         ppo_target_kl=ppo_target_kl,
+        ppo_ratio_threshold=ppo_ratio_threshold,
         **tokenizer_module,
     )
 

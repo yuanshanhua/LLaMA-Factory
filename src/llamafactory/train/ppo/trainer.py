@@ -99,6 +99,7 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
         ppo_horizon: Optional[float] = None,
         ppo_early_stopping: Optional[bool] = None,
         ppo_target_kl: Optional[float] = None,
+        ppo_ratio_threshold: Optional[float] = None,
     ) -> None:
         backward_batch_size = training_args.per_device_train_batch_size * training_args.gradient_accumulation_steps
         if gen_batch_size is None:
@@ -143,6 +144,8 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
             ppo_config.early_stopping = ppo_early_stopping
         if ppo_target_kl is not None:
             ppo_config.target_kl = ppo_target_kl
+        if ppo_ratio_threshold is not None:
+            ppo_config.ratio_threshold = ppo_ratio_threshold
 
         # Add deepspeed config
         if training_args.deepspeed_plugin is not None:
