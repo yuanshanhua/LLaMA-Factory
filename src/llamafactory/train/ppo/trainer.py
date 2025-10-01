@@ -384,9 +384,7 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
                                 "kl_coef",
                                 "policy_loss",
                                 "value_loss",
-                                "ratio_mean",
-                                "ratio_p95",
-                                "ratio_outside_clip",
+                                "avg_ratio_max",
                                 "advantage_std",
                             ]
                         }
