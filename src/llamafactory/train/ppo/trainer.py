@@ -293,13 +293,6 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
         mylogger.info(f"  PPO backward batch size = {self.config.backward_batch_size:,}")
         mylogger.info(f"  PPO mini batch size = {self.config.mini_batch_size:,}")
 
-        if self.is_local_process_zero():
-            hyperparam_logs = self._build_hyperparam_logs(
-                num_examples=num_examples, num_train_epochs=num_train_epochs, max_steps=max_steps
-            )
-            self.state.log_history.append(hyperparam_logs)
-            self.callback_handler.on_log(self.args, self.state, self.control, hyperparam_logs)
-
         dataiter = iter(self.dataloader)
         loss_meter = AverageMeter()
         reward_meter = AverageMeter()
@@ -313,6 +306,14 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
         # logs = dict(eval_reward=eval_reward, epoch=0)
         # self.state.log_history.append(logs)
         # self.callback_handler.on_log(self.args, self.state, self.control, logs)
+
+        # 记录超参数
+        if self.is_local_process_zero():
+            hyperparam_logs = self._build_hyperparam_logs(
+                num_examples=num_examples, num_train_epochs=num_train_epochs, max_steps=max_steps
+            )
+            self.state.log_history.append(hyperparam_logs)
+            self.callback_handler.on_log(self.args, self.state, self.control, hyperparam_logs)
 
         for step in tqdm(range(max_steps), disable=not self.is_local_process_zero()):
             try:
@@ -433,13 +434,7 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
 
         self.callback_handler.on_train_end(self.args, self.state, self.control)
 
-    def _build_hyperparam_logs(
-        self,
-        *,
-        num_examples: int,
-        num_train_epochs: int,
-        max_steps: int,
-    ) -> dict[str, Any]:
+    def _build_hyperparam_logs(self, *, num_examples: int, num_train_epochs: int, max_steps: int) -> dict[str, Any]:
         def _to_float(value: float | None) -> float:
             if value is None:
                 return float("nan")
@@ -450,8 +445,6 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
 
         config: PPOConfig = self.config
         logs: dict[str, Any] = {
-            "event": "ppo_hyperparameters",
-            "step": self.state.global_step,
             "epoch": 0,
             "learning_rate": _to_float(config.learning_rate),
             "lr_scheduler_type": str(self.args.lr_scheduler_type),
