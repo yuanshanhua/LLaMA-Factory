@@ -100,6 +100,10 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
         ppo_early_stopping: Optional[bool] = None,
         ppo_target_kl: Optional[float] = None,
         ppo_ratio_threshold: Optional[float] = None,
+        ppo_lam: Optional[float] = None,
+        ppo_cliprange: Optional[float] = None,
+        ppo_cliprange_value: Optional[float] = None,
+        ppo_vf_coef: Optional[float] = None,
     ) -> None:
         backward_batch_size = training_args.per_device_train_batch_size * training_args.gradient_accumulation_steps
         if gen_batch_size is None:
@@ -146,6 +150,14 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
             ppo_config.target_kl = ppo_target_kl
         if ppo_ratio_threshold is not None:
             ppo_config.ratio_threshold = ppo_ratio_threshold
+        if ppo_lam is not None:
+            ppo_config.lam = ppo_lam
+        if ppo_cliprange is not None:
+            ppo_config.cliprange = ppo_cliprange
+        if ppo_cliprange_value is not None:
+            ppo_config.cliprange_value = ppo_cliprange_value
+        if ppo_vf_coef is not None:
+            ppo_config.vf_coef = ppo_vf_coef
 
         # Add deepspeed config
         if training_args.deepspeed_plugin is not None:
@@ -281,6 +293,13 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
         mylogger.info(f"  PPO backward batch size = {self.config.backward_batch_size:,}")
         mylogger.info(f"  PPO mini batch size = {self.config.mini_batch_size:,}")
 
+        if self.is_local_process_zero():
+            hyperparam_logs = self._build_hyperparam_logs(
+                num_examples=num_examples, num_train_epochs=num_train_epochs, max_steps=max_steps
+            )
+            self.state.log_history.append(hyperparam_logs)
+            self.callback_handler.on_log(self.args, self.state, self.control, hyperparam_logs)
+
         dataiter = iter(self.dataloader)
         loss_meter = AverageMeter()
         reward_meter = AverageMeter()
@@ -414,7 +433,60 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
 
         self.callback_handler.on_train_end(self.args, self.state, self.control)
 
-    # ---------------------------------------------------------------------
+    def _build_hyperparam_logs(
+        self,
+        *,
+        num_examples: int,
+        num_train_epochs: int,
+        max_steps: int,
+    ) -> dict[str, Any]:
+        def _to_float(value: float | None) -> float:
+            if value is None:
+                return float("nan")
+            try:
+                return float(value)
+            except TypeError:
+                return float("nan")
+
+        config: PPOConfig = self.config
+        logs: dict[str, Any] = {
+            "event": "ppo_hyperparameters",
+            "step": self.state.global_step,
+            "epoch": 0,
+            "learning_rate": _to_float(config.learning_rate),
+            "lr_scheduler_type": str(self.args.lr_scheduler_type),
+            "per_device_train_batch_size": int(self.args.per_device_train_batch_size),
+            "gradient_accumulation_steps": int(self.args.gradient_accumulation_steps),
+            "ppo_buffer_size": int(self.finetuning_args.ppo_buffer_size),
+            "ppo_epochs": int(config.ppo_epochs),
+            "num_examples": int(num_examples),
+            "num_train_epochs": int(num_train_epochs),
+            "total_steps": int(max_steps),
+            "gen_batch_size": self.gen_batch_size,
+            "batch_size": int(config.batch_size),
+            "backward_batch_size": int(config.backward_batch_size),
+            "mini_batch_size": int(config.mini_batch_size),
+            "target": _to_float(config.target),
+            "target_kl": _to_float(config.target_kl),
+            "horizon": _to_float(config.horizon),
+            "lam": _to_float(config.lam),
+            "cliprange": _to_float(config.cliprange),
+            "cliprange_value": _to_float(config.cliprange_value),
+            "vf_coef": _to_float(config.vf_coef),
+            "ratio_threshold": _to_float(config.ratio_threshold),
+            "init_kl_coef": _to_float(config.init_kl_coef),
+            "adap_kl_ctrl": bool(config.adap_kl_ctrl),
+            "kl_penalty": config.kl_penalty,
+            "early_stopping": bool(config.early_stopping),
+            "whiten_rewards": bool(config.whiten_rewards),
+            "use_score_scaling": bool(config.use_score_scaling),
+            "use_score_norm": bool(config.use_score_norm),
+            "logging_steps": int(self.args.logging_steps),
+            "save_steps": int(self.args.save_steps),
+            "world_size": int(self.args.world_size),
+        }
+        return logs
+
     def _build_extended_logs(
         self,
         stats: dict[str, Any],

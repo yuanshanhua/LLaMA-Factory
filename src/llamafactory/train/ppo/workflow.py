@@ -60,6 +60,10 @@ def run_ppo(
     ppo_early_stopping: Optional[bool] = None,
     ppo_target_kl: Optional[float] = None,
     ppo_ratio_threshold: Optional[float] = None,
+    ppo_lam: Optional[float] = None,
+    ppo_cliprange: Optional[float] = None,
+    ppo_cliprange_value: Optional[float] = None,
+    ppo_vf_coef: Optional[float] = None,
 ):
     tokenizer_module = load_tokenizer(model_args)
     tokenizer = tokenizer_module["tokenizer"]
@@ -114,6 +118,10 @@ def run_ppo(
         ppo_early_stopping=ppo_early_stopping,
         ppo_target_kl=ppo_target_kl,
         ppo_ratio_threshold=ppo_ratio_threshold,
+        ppo_lam=ppo_lam,
+        ppo_cliprange=ppo_cliprange,
+        ppo_cliprange_value=ppo_cliprange_value,
+        ppo_vf_coef=ppo_vf_coef,
         **tokenizer_module,
     )
 
