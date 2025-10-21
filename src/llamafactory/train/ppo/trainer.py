@@ -40,7 +40,15 @@ from transformers.trainer_pt_utils import remove_dummy_checkpoint
 from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
 from transformers.utils import SAFE_WEIGHTS_NAME, WEIGHTS_NAME
 from trl import PPOConfig, PPOTrainer
-from trl.core import PPODecorators, logprobs_from_logits, masked_mean
+from trl.core import (
+    WANDB_PADDING,
+    PPODecorators,
+    convert_to_scalar,
+    logprobs_from_logits,
+    masked_mean,
+    stack_dicts,
+    stats_to_np,
+)
 from trl.models.utils import unwrap_model_for_generation
 from typing_extensions import override
 
@@ -91,6 +99,11 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
         eval_dataset: Optional["Dataset"] = None,
         eval_batch_size: int = 16,
         gen_batch_size: Optional[int] = None,
+        # Token-level reward function (optional). Should return a list of 1D tensors
+        # aligned to each response's token length (after generation, before padding).
+        reward_fn: Optional[
+            Callable[[list["torch.Tensor"], list["torch.Tensor"], "PreTrainedTokenizer"], list["torch.Tensor"]]
+        ] = None,
         # Optional PPOConfig overrides
         ppo_adap_kl_ctrl: Optional[bool] = None,
         ppo_init_kl_coef: Optional[float] = None,
@@ -198,6 +211,7 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
         self.model_args = model_args
         self.finetuning_args = finetuning_args
         self.reward_model = reward_model
+        self.reward_fn = reward_fn
         self.current_device = get_current_device()  # patch for deepspeed training
 
         self.tokenizer = self.processing_class  # 避免打印 Trainer.tokenizer is now deprecated. 警告
@@ -247,6 +261,63 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
         self.eval_collator = data_collator
         self.eval_dataset = eval_dataset
         self.eval_batch_size = eval_batch_size
+
+    # -----------------------------
+    # Token-level reward helpers
+    # -----------------------------
+    @torch.no_grad()
+    def _call_reward_fn(self, queries: list["torch.Tensor"], responses: list["torch.Tensor"]) -> list["torch.Tensor"]:
+        """Call external reward_fn to generate per-token rewards for each response.
+
+        Expected: reward_fn returns a list of 1D tensors, each length == len(response_i).
+        The returned tensors can be on CPU; we'll convert devices later where needed.
+        """
+        assert self.reward_fn is not None, "reward_fn is not provided"
+        rewards_list = self.reward_fn(queries, responses, self.tokenizer)
+        # Normalize output to list[torch.Tensor]
+        norm_list: list[torch.Tensor] = []
+        for r in rewards_list:
+            if not isinstance(r, torch.Tensor):
+                r = torch.tensor(r)
+            if r.dim() != 1:
+                raise ValueError("reward_fn must return 1D tensors per sample (per-token rewards)")
+            norm_list.append(r)
+        if len(norm_list) != len(responses):
+            raise ValueError("reward_fn must return the same number of elements as responses")
+        # Basic length check
+        for i, (r, resp) in enumerate(zip(norm_list, responses)):
+            if r.numel() != resp.numel():
+                raise ValueError(
+                    f"reward_fn output length mismatch at sample {i}: {r.numel()} vs response {resp.numel()}"
+                )
+        return norm_list
+
+    @torch.no_grad()
+    def _build_full_token_rewards(
+        self,
+        token_rewards_list: list["torch.Tensor"],
+        masks: "torch.Tensor",
+    ) -> "torch.Tensor":
+        """Pad/align per-response token rewards to full mask shape.
+
+        masks: shape [bs, seq_len-1], 1 indicates response token positions; 0 elsewhere.
+        token_rewards_list: list of length bs, each tensor is [response_length].
+        Return: rewards_full [bs, seq_len-1], with rewards filled at mask==1 positions, 0 elsewhere.
+        """
+        bs, seqlen = masks.shape
+        device = masks.device
+        dtype = torch.float32
+        rewards_full = torch.zeros((bs, seqlen), device=device, dtype=dtype)
+        for j in range(bs):
+            idx = (masks[j] > 0).nonzero(as_tuple=False).squeeze(-1)
+            r = token_rewards_list[j].to(device=device, dtype=dtype)
+            if idx.numel() != r.numel():
+                raise ValueError(
+                    f"Mask-response length mismatch at sample {j}: mask positions {idx.numel()} vs rewards {r.numel()}"
+                )
+            if idx.numel() > 0:
+                rewards_full[j, idx] = r
+        return rewards_full
 
     def ppo_train(self, resume_from_checkpoint: Optional[str] = None) -> None:
         r"""Implement training loop for the PPO stage, like _inner_training_loop() in Huggingface's Trainer."""
@@ -341,7 +412,11 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
                 mini_batch_queries, mini_batch_responses, mini_batch_columns, mini_batch_sqls = self.get_inputs(
                     mini_batch
                 )
-                mini_batch_rewards = self.get_rewards(mini_batch_queries, mini_batch_responses)
+                # 当使用 reward_fn 计算 token reward 时, 无须调用 self.get_rewards()
+                if self.reward_fn is not None:
+                    mini_batch_rewards = [torch.tensor(0.0)] * len(mini_batch_responses)
+                else:
+                    mini_batch_rewards = self.get_rewards(mini_batch_queries, mini_batch_responses)
                 queries.extend(mini_batch_queries)
                 responses.extend(mini_batch_responses)
                 rewards.extend(mini_batch_rewards)
@@ -376,7 +451,10 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
             )
             self.tokenizer.padding_side = "left"  # restore padding side
             loss_meter.update(float(stats["ppo/loss/total"]), n=len(rewards))
-            reward_meter.update(torch.stack(rewards).mean().item(), n=len(rewards))
+            if self.reward_fn is not None:  # 使用 token rewards 时, 使用 reward_sum_avg 记录日志
+                reward_meter.update(stats.pop("ppo/reward_sum_avg"))
+            else:
+                reward_meter.update(torch.stack(rewards).mean().item(), n=len(rewards))
 
             if self.config.log_with is not None:
                 try:
@@ -433,6 +511,250 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
                 break
 
         self.callback_handler.on_train_end(self.args, self.state, self.control)
+
+    @override
+    @PPODecorators.empty_device_cache()
+    def step(
+        self,
+        queries: list[torch.LongTensor],
+        responses: list[torch.LongTensor],
+        scores: list[torch.FloatTensor],
+        response_masks: Optional[list[torch.LongTensor]] = None,
+    ):
+        """Override TRL step with token-level rewards injection; other logic identical to TRL."""
+        bs = self.config.batch_size
+
+        # Safety checker (exactly TRL)
+        queries, responses, scores, response_masks = self._step_safety_checker(
+            bs, queries, responses, scores, response_masks
+        )
+
+        # Score scaling/clipping (exactly TRL)
+        scores = torch.tensor(scores, device=self.current_device)
+        if self.config.use_score_scaling:
+            scores_mean, scores_std = self.running.update(scores)
+            tensor_to_kwargs = dict(dtype=scores.dtype, device=scores.device)
+            score_scaling_factor = self.running.std.to(**tensor_to_kwargs) + torch.finfo(scores.dtype).eps
+            if self.config.use_score_norm:
+                scores = (scores - self.running.mean.to(**tensor_to_kwargs)) / score_scaling_factor
+            else:
+                scores /= score_scaling_factor
+
+        if self.config.score_clip is not None:
+            scores_dtype = scores.dtype
+            scores = torch.clip(scores.float(), -self.config.score_clip, self.config.score_clip).to(dtype=scores_dtype)
+
+        # Push to hub if best (same as TRL)
+        if hasattr(self, "highest_reward"):
+            if self.compare_step % self.config.compare_steps == 0:
+                curr_mean_reward = scores.mean()
+                if curr_mean_reward > self.highest_reward:
+                    self.highest_reward = curr_mean_reward
+                    self.push_to_hub(**self.push_to_hub_kwargs)
+            self.compare_step += 1
+
+        timing = dict()
+        t0 = time.time()
+        t = time.time()
+
+        # Prepare model inputs (same as TRL)
+        model_inputs = self.prepare_model_inputs(queries, responses)
+        if self.is_distributed:
+            pad_first = self.tokenizer.padding_side == "left"
+            model_inputs["input_ids"] = self.accelerator.pad_across_processes(
+                model_inputs["input_ids"], dim=1, pad_index=self.tokenizer.pad_token_id, pad_first=pad_first
+            )
+            model_inputs["attention_mask"] = self.accelerator.pad_across_processes(
+                model_inputs["attention_mask"], dim=1, pad_index=0, pad_first=pad_first
+            )
+            if self.is_encoder_decoder:
+                model_inputs["decoder_input_ids"] = self.accelerator.pad_across_processes(
+                    model_inputs["decoder_input_ids"],
+                    dim=1,
+                    pad_index=self.tokenizer.pad_token_id,
+                    pad_first=pad_first,
+                )
+                model_inputs["decoder_attention_mask"] = self.accelerator.pad_across_processes(
+                    model_inputs["decoder_attention_mask"], dim=1, pad_index=0, pad_first=pad_first
+                )
+
+        model_inputs_names = list(model_inputs.keys())
+        full_kl_penalty = self.config.kl_penalty == "full"
+
+        # Forward pass current/ref (same as TRL)
+        with torch.no_grad():
+            all_logprobs, logits_or_none, values, masks = self.batched_forward_pass(
+                self.model,
+                queries,
+                responses,
+                model_inputs,
+                response_masks=response_masks,
+                return_logits=full_kl_penalty,
+            )
+            with self.optional_peft_ctx():
+                ref_logprobs, ref_logits_or_none, _, _ = self.batched_forward_pass(
+                    self.model if self.is_peft_model else self.ref_model,
+                    queries,
+                    responses,
+                    model_inputs,
+                    return_logits=full_kl_penalty,
+                )
+
+        timing["time/ppo/forward_pass"] = time.time() - t
+
+        # Compute rewards and advantages (inject token rewards, keep rest identical)
+        with torch.no_grad():
+            t = time.time()
+            if full_kl_penalty:
+                active_full_logprobs = logprobs_from_logits(logits_or_none, None, gather=False)
+                ref_full_logprobs = logprobs_from_logits(ref_logits_or_none, None, gather=False)
+                # KL penalty per token (same as TRL)
+                kls = self._kl_penalty(active_full_logprobs, ref_full_logprobs)
+            else:
+                kls = self._kl_penalty(all_logprobs, ref_logprobs)
+
+            non_score_reward = -self.kl_ctl.value * kls
+
+            if self.reward_fn is None:
+                # Keep TRL's original behavior
+                if full_kl_penalty:
+                    rewards, non_score_reward, kls = self.compute_rewards(
+                        scores, active_full_logprobs, ref_full_logprobs, masks
+                    )
+                else:
+                    rewards, non_score_reward, kls = self.compute_rewards(scores, all_logprobs, ref_logprobs, masks)
+            else:
+                # Inject external token rewards: align and add KL penalty
+                token_rewards_list = self._call_reward_fn(queries, responses)
+                # 使用求和累加每个样本的 token reward, 仅供日志使用
+                reward_sums = [r.sum().item() for r in token_rewards_list]
+                reward_sum_avg = sum(reward_sums) / len(reward_sums)
+                rewards = self._build_full_token_rewards(token_rewards_list, masks)
+                rewards = rewards + non_score_reward
+
+            timing["time/ppo/compute_rewards"] = time.time() - t
+
+            t = time.time()
+            values, advantages, returns = self.compute_advantages(values, rewards, masks)
+            timing["time/ppo/compute_advantages"] = time.time() - t
+
+        # Build batch dict (same as TRL)
+        batch_dict = {
+            "queries": queries,
+            "responses": responses,
+            "logprobs": all_logprobs.to(torch.float32),
+            "values": values.to(torch.float32),
+            "masks": masks,
+            "advantages": advantages,
+            "returns": returns,
+        }
+        batch_dict.update(model_inputs)
+
+        # Optimization loop (same as TRL)
+        t = time.time()
+        all_stats = []
+        early_stop = False
+        for _ in range(self.config.ppo_epochs):
+            if early_stop:
+                break
+            b_inds = np.random.permutation(bs)
+            for backward_batch_start in range(0, bs, self.config.backward_batch_size):
+                backward_batch_end = backward_batch_start + self.config.backward_batch_size
+                backward_batch_inds = b_inds[backward_batch_start:backward_batch_end]
+
+                for mini_batch_start in range(0, self.config.backward_batch_size, self.config.mini_batch_size):
+                    mini_batch_end = mini_batch_start + self.config.mini_batch_size
+                    mini_batch_inds = backward_batch_inds[mini_batch_start:mini_batch_end]
+                    mini_batch_dict = {
+                        "logprobs": batch_dict["logprobs"][mini_batch_inds],
+                        "values": batch_dict["values"][mini_batch_inds],
+                        "masks": batch_dict["masks"][mini_batch_inds],
+                        # hacks: the queries and responses are ragged.
+                        "queries": [batch_dict["queries"][i] for i in mini_batch_inds],
+                        "responses": [batch_dict["responses"][i] for i in mini_batch_inds],
+                        "advantages": batch_dict["advantages"][mini_batch_inds],
+                        "returns": batch_dict["returns"][mini_batch_inds],
+                    }
+                    for k in model_inputs_names:
+                        mini_batch_dict[k] = batch_dict[k][mini_batch_inds]
+                    with self.accelerator.accumulate(self.model):
+                        model_inputs_mb = {k: mini_batch_dict[k] for k in model_inputs_names}
+                        logprobs_mb, logits_mb, vpreds_mb, _ = self.batched_forward_pass(
+                            self.model,
+                            mini_batch_dict["queries"],
+                            mini_batch_dict["responses"],
+                            model_inputs_mb,
+                            return_logits=True,
+                        )
+                        train_stats = self.train_minibatch(
+                            mini_batch_dict["logprobs"],
+                            mini_batch_dict["values"],
+                            logprobs_mb,
+                            logits_mb,
+                            vpreds_mb,
+                            mini_batch_dict["masks"],
+                            mini_batch_dict["advantages"],
+                            mini_batch_dict["returns"],
+                        )
+                        all_stats.append(train_stats)
+
+            if self.config.early_stopping:
+                policykl = train_stats["policy/policykl"]
+                early_stop = self._early_stop(policykl)
+                if early_stop:
+                    break
+
+        timing["time/ppo/optimize_step"] = time.time() - t
+
+        # Post optimization stats (same as TRL)
+        t = time.time()
+        train_stats = stack_dicts(all_stats)
+        train_stats["policy/advantages"] = torch.flatten(train_stats["policy/advantages"]).unsqueeze(0)
+        train_stats["policy/advantages"] = torch.nan_to_num(train_stats["policy/advantages"], WANDB_PADDING)
+        train_stats["policy/ratio"] = torch.flatten(train_stats["policy/ratio"]).unsqueeze(0)
+
+        stats = self.record_step_stats(
+            scores=scores,
+            logprobs=all_logprobs,
+            ref_logprobs=ref_logprobs,
+            non_score_reward=non_score_reward,
+            train_stats=train_stats,
+            kl_coef=self.kl_ctl.value,
+            masks=masks,
+            queries=queries,
+            responses=responses,
+            kls=kls,
+        )
+
+        # 记录 reward_sum_avg 供日志使用
+        if self.reward_fn is not None:
+            stats["ppo/reward_sum_avg"] = reward_sum_avg
+
+        # Gather/Reduce + convert (same as TRL)
+        if self.is_distributed:
+            stats = self.gather_stats(stats)
+        stats = stats_to_np(stats)
+        timing["time/ppo/calc_stats"] = time.time() - t
+        stats["ppo/learning_rate"] = self.optimizer.param_groups[0]["lr"]
+
+        # Update KL controller (same as TRL)
+        self.kl_ctl.update(
+            stats["objective/kl"],
+            self.config.batch_size * self.accelerator.num_processes,
+        )
+
+        # Log total time (same as TRL)
+        timing["time/ppo/total"] = time.time() - t0
+        stats.update(timing)
+
+        # Non-wandb post-process
+        if self.config.log_with != "wandb":
+            stats = convert_to_scalar(stats)
+
+        if self.lr_scheduler is not None:
+            self.lr_scheduler.step()
+
+        return stats
 
     def _build_hyperparam_logs(self, *, num_examples: int, num_train_epochs: int, max_steps: int) -> dict[str, Any]:
         def _to_float(value: float | None) -> float:

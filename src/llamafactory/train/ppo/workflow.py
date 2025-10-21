@@ -16,12 +16,13 @@
 # limitations under the License.
 
 import os
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 import torch
 from lmf_hooks.model import config, logger
-from scripts.sft_projector import CustomDataset, new_collator_rl
 from torch.utils.data import random_split
+
+from scripts.sft_projector import CustomDataset, new_collator_rl
 
 from ...extras.ploting import plot_loss
 from ...model import load_model, load_tokenizer
@@ -33,7 +34,7 @@ from .trainer import CustomPPOTrainer
 logger = logger.getChild("ppo.workflow")
 
 if TYPE_CHECKING:
-    from transformers import Seq2SeqTrainingArguments, TrainerCallback
+    from transformers import PreTrainedTokenizer, Seq2SeqTrainingArguments, TrainerCallback
 
     from ...hparams import DataArguments, FinetuningArguments, GeneratingArguments, ModelArguments
 
@@ -51,6 +52,9 @@ def run_ppo(
     eval_set_percent: float = 0.0,
     eval_batch_size: int = 16,
     gen_batch_size: Optional[int] = None,
+    token_level_reward_fn: Optional[
+        Callable[[list["torch.Tensor"], list["torch.Tensor"], "PreTrainedTokenizer"], list["torch.Tensor"]]
+    ] = None,
     # Optional PPOConfig overrides
     ppo_adap_kl_ctrl: Optional[bool] = None,
     ppo_init_kl_coef: Optional[float] = None,
@@ -110,6 +114,7 @@ def run_ppo(
         eval_dataset=eval_dataset,
         eval_batch_size=eval_batch_size,
         gen_batch_size=gen_batch_size,
+        reward_fn=token_level_reward_fn,
         ppo_adap_kl_ctrl=ppo_adap_kl_ctrl,
         ppo_init_kl_coef=ppo_init_kl_coef,
         ppo_kl_penalty=ppo_kl_penalty,
