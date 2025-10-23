@@ -114,6 +114,7 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
         ppo_target_kl: Optional[float] = None,
         ppo_ratio_threshold: Optional[float] = None,
         ppo_lam: Optional[float] = None,
+        ppo_gamma: Optional[float] = None,
         ppo_cliprange: Optional[float] = None,
         ppo_cliprange_value: Optional[float] = None,
         ppo_vf_coef: Optional[float] = None,
@@ -165,6 +166,8 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
             ppo_config.ratio_threshold = ppo_ratio_threshold
         if ppo_lam is not None:
             ppo_config.lam = ppo_lam
+        if ppo_gamma is not None:
+            ppo_config.gamma = ppo_gamma
         if ppo_cliprange is not None:
             ppo_config.cliprange = ppo_cliprange
         if ppo_cliprange_value is not None:
