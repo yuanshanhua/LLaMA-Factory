@@ -19,6 +19,7 @@ import os
 from typing import TYPE_CHECKING, Callable, Optional
 
 import torch
+from index_advisor.workload import load_workloads
 from lmf_hooks.model import config, logger
 from torch.utils.data import random_split
 
@@ -55,6 +56,7 @@ def run_ppo(
     token_level_reward_fn: Optional[
         Callable[[list["torch.Tensor"], list["torch.Tensor"], "PreTrainedTokenizer"], list["torch.Tensor"]]
     ] = None,
+    db_config_d: dict,
     # Optional PPOConfig overrides
     ppo_adap_kl_ctrl: Optional[bool] = None,
     ppo_init_kl_coef: Optional[float] = None,
@@ -83,7 +85,7 @@ def run_ppo(
 
     model = hook_rl_model(model)
 
-    dataset = CustomDataset(workload_file, tokenizer, config(), generate=True)
+    dataset = CustomDataset(load_workloads(workload_file), tokenizer, config(), db_config_d, generate=True)
     eval_dataset = None
     if eval_set_percent > 0:
         eval_size = int(len(dataset) * eval_set_percent)
