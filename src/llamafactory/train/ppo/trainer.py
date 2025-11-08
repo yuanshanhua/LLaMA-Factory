@@ -913,7 +913,7 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
             batch_size=self.eval_batch_size,
             shuffle=False,
             collate_fn=self.eval_collator,
-            num_workers=batch_size,
+            num_workers=self.eval_batch_size,
         )
 
         reward_meter = AverageMeter()
