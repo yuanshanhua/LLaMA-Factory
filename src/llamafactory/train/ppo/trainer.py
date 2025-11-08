@@ -15,6 +15,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import gc
 import math
 import os
 import sys
@@ -28,6 +29,7 @@ import torch
 from accelerate.utils import DistributedDataParallelKwargs
 from index_advisor.ia_logging import logger as ia_logger
 from index_advisor.mm.model import DATASET_COLUMNS, DATASET_SQLS
+from index_advisor.schemas.schema import Index
 from lmf_hooks.reward import get_reward
 from safetensors.torch import save_file
 from torch.utils.data import DataLoader, Dataset
@@ -98,6 +100,8 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
         train_dataset: Optional["Dataset"] = None,
         eval_dataset: Optional["Dataset"] = None,
         eval_batch_size: int = 16,
+        eval_size_limit: float = 500 * 1024 * 1024,
+        eval_count_limit: int = 5,
         gen_batch_size: Optional[int] = None,
         # Token-level reward function (optional). Should return a list of 1D tensors
         # aligned to each response's token length (after generation, before padding).
@@ -264,6 +268,8 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
         self.eval_collator = data_collator
         self.eval_dataset = eval_dataset
         self.eval_batch_size = eval_batch_size
+        self.eval_size_limit = eval_size_limit
+        self.eval_count_limit = eval_count_limit
 
     # -----------------------------
     # Token-level reward helpers
@@ -366,6 +372,9 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
         mylogger.info(f"  PPO batch size = {self.config.batch_size:,}")
         mylogger.info(f"  PPO backward batch size = {self.config.backward_batch_size:,}")
         mylogger.info(f"  PPO mini batch size = {self.config.mini_batch_size:,}")
+        mylogger.info(f"  Eval 样本数 = {len(self.eval_dataset) if self.eval_dataset is not None else 0:,}")
+        # mylogger.info(f"  Eval size limit = {self.eval_size_limit / (1024 * 1024):.2f} MB")
+        # mylogger.info(f"  Eval count limit = {self.eval_count_limit}")
 
         dataiter = iter(self.dataloader)
         loss_meter = AverageMeter()
@@ -893,20 +902,33 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
             return 0
         if not self.eval_batch_size:
             self.eval_batch_size = self.config.mini_batch_size
+
+        IDX_GUARD = Index("invalid", [])
+        workloads = eval_dataset.data
+        # for w in workloads:
+        #     w.labels = [IDX_GUARD]
+
         dataloader = DataLoader(
             eval_dataset,
             batch_size=self.eval_batch_size,
             shuffle=False,
             collate_fn=self.eval_collator,
+            num_workers=batch_size,
         )
+
         reward_meter = AverageMeter()
         self.model.eval()
+        # for turn in range(1, self.eval_count_limit + 1):
+        # mylogger.info(f"🔄 开始第 {turn} 轮 Eval")
+        # gc.collect()
+        # torch.cuda.empty_cache()
+
         for batch in tqdm(dataloader, desc="Evaluating", disable=not self.is_local_process_zero()):
             for k, v in batch.items():
                 batch[k] = v.to(self.current_device)
             queries, responses, _, _ = self.get_inputs(batch)
             rewards = self.get_rewards(queries, responses)
-            reward_meter.update(torch.stack(rewards).mean().item(), n=len(rewards))
+        reward_meter.update(torch.stack(rewards).mean().item(), n=len(rewards))
         self.model.train()
         return round(reward_meter.avg, 4)
 
@@ -1001,6 +1023,7 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
         )
         return lr_scheduler
 
+    @PPODecorators.empty_device_cache()
     @torch.no_grad()
     def get_inputs(
         self, batch: dict[str, "torch.Tensor"]
