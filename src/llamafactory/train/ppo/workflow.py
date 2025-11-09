@@ -114,7 +114,7 @@ def run_ppo(
     if eval_set is not None:
         logger.info("为评估数据集构建成本和大小缓存...")
         t = time.time()
-        cost_cache, size_cache = build_cache(eval_set, db_option, 16)
+        # cost_cache, size_cache = build_cache(eval_set, db_option, 16)
         logger.info(f"评估数据集缓存构建完成，耗时 {time.time() - t:.2f} 秒")
         eval_dataset = CustomDataset(
             eval_set,
@@ -123,12 +123,12 @@ def run_ppo(
             db_option.to_dict(),
             generate=True,
             extend=False,
-            cost_cache=cost_cache,
-            size_cache=size_cache,
+            # cost_cache=cost_cache,
+            # size_cache=size_cache,
         )
     logger.info("为训练数据集构建成本和大小缓存...")
     t = time.time()
-    cost_cache, size_cache = build_cache(train_set, db_option, 16)
+    # cost_cache, size_cache = build_cache(train_set, db_option, 16)
     logger.info(f"训练数据集缓存构建完成，耗时 {time.time() - t:.2f} 秒")
     dataset = CustomDataset(
         train_set,
@@ -136,8 +136,8 @@ def run_ppo(
         config(),
         db_option.to_dict(),
         generate=True,
-        cost_cache=cost_cache,
-        size_cache=size_cache,
+        # cost_cache=cost_cache,
+        # size_cache=size_cache,
     )
 
     tokenizer.padding_side = "left"  # use left-padding in generation while using right-padding in training
