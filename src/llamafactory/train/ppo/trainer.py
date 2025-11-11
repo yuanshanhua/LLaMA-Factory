@@ -919,33 +919,20 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
             return 0
         if not self.eval_batch_size:
             self.eval_batch_size = self.config.mini_batch_size
-
-        IDX_GUARD = Index("invalid", [])
-        workloads = eval_dataset.data
-        # for w in workloads:
-        #     w.labels = [IDX_GUARD]
-
         dataloader = DataLoader(
             eval_dataset,
             batch_size=self.eval_batch_size,
             shuffle=False,
             collate_fn=self.eval_collator,
-            num_workers=self.eval_batch_size,
         )
-
         reward_meter = AverageMeter()
         self.model.eval()
-        # for turn in range(1, self.eval_count_limit + 1):
-        # mylogger.info(f"🔄 开始第 {turn} 轮 Eval")
-        # gc.collect()
-        # torch.cuda.empty_cache()
-
         for batch in tqdm(dataloader, desc="Evaluating", disable=not self.is_local_process_zero()):
             for k, v in batch.items():
                 batch[k] = v.to(self.current_device)
             queries, responses, _, _ = self.get_inputs(batch)
             rewards = self.get_rewards(queries, responses)
-        reward_meter.update(torch.stack(rewards).mean().item(), n=len(rewards))
+            reward_meter.update(torch.stack(rewards).mean().item(), n=len(rewards))
         self.model.train()
         return round(reward_meter.avg, 4)
 

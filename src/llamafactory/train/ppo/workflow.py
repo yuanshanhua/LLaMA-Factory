@@ -126,7 +126,7 @@ def run_ppo(
             config(),
             db_option.to_dict(),
             generate=True,
-            extend=False,
+            extend=True,
             # cost_cache=cost_cache,
             # size_cache=size_cache,
         )
