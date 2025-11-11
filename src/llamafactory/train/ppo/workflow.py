@@ -160,7 +160,7 @@ def run_ppo(
         model=model,
         reward_model=reward_model,
         ref_model=ref_model,
-        ref_adapter_name="raw",
+        ref_adapter_name="raw" if model_args.adapter_name_or_path else None,
         data_collator=new_collator_rl(tokenizer.pad_token_id),
         training_data_collator=new_collator_rl(tokenizer.pad_token_id, padding_side="right"),
         train_dataset=dataset,
