@@ -26,6 +26,7 @@ from index_advisor.db import DBOption
 from index_advisor.utils import compute_workloads_summary
 from index_advisor.workload import load_workloads
 from lmf_hooks.model import config, logger
+from peft.peft_model import PeftModel
 
 from scripts.sft_projector import CustomDataset, new_collator_rl
 
@@ -87,6 +88,9 @@ def run_ppo(
 
     model = load_model(tokenizer, model_args, finetuning_args, training_args.do_train, add_valuehead=True)
 
+    if isinstance(model.pretrained_model, PeftModel) and model_args.adapter_name_or_path:
+        # load 一个 adapter 的副本以供 reference model 使用
+        model.pretrained_model.load_adapter(model_args.adapter_name_or_path[-1], "raw")
     from lmf_hooks.model import hook_rl_model
 
     model = hook_rl_model(model)
@@ -156,6 +160,7 @@ def run_ppo(
         model=model,
         reward_model=reward_model,
         ref_model=ref_model,
+        ref_adapter_name="raw",
         data_collator=new_collator_rl(tokenizer.pad_token_id),
         training_data_collator=new_collator_rl(tokenizer.pad_token_id, padding_side="right"),
         train_dataset=dataset,

@@ -21,6 +21,7 @@ import os
 import sys
 import time
 import warnings
+from contextlib import contextmanager, nullcontext
 from types import MethodType
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
@@ -93,6 +94,7 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
         model: "AutoModelForCausalLMWithValueHead",
         reward_model: Optional["AutoModelForCausalLMWithValueHead"],
         ref_model: Optional["AutoModelForCausalLMWithValueHead"],
+        ref_adapter_name: Optional[str],
         tokenizer: "PreTrainedTokenizer",
         processor: Optional["ProcessorMixin"],
         data_collator: "DataCollatorWithPadding",
@@ -217,6 +219,7 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
         self.args = training_args
         self.model_args = model_args
         self.finetuning_args = finetuning_args
+        self.ref_adapter_name = ref_adapter_name
         self.reward_model = reward_model
         self.reward_fn = reward_fn
         self.current_device = get_current_device()  # patch for deepspeed training
@@ -524,6 +527,20 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
 
         self.callback_handler.on_train_end(self.args, self.state, self.control)
 
+    @contextmanager
+    def ref_context(self):
+        """Context manager for handling null reference model (that is, peft adapter manipulation)."""
+        with (
+            self.accelerator.unwrap_model(self.model).pretrained_model.disable_adapter()
+            if self.is_peft_model and not self.ref_adapter_name
+            else nullcontext()
+        ):
+            if self.ref_adapter_name:
+                self.model.pretrained_model.set_adapter(self.ref_adapter_name)
+            yield
+            if self.ref_adapter_name:
+                self.model.pretrained_model.set_adapter("default")
+
     @override
     @PPODecorators.empty_device_cache()
     def step(
@@ -603,7 +620,7 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
                 response_masks=response_masks,
                 return_logits=full_kl_penalty,
             )
-            with self.optional_peft_ctx():
+            with self.ref_context():
                 ref_logprobs, ref_logits_or_none, _, _ = self.batched_forward_pass(
                     self.model if self.is_peft_model else self.ref_model,
                     queries,
