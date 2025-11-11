@@ -29,7 +29,7 @@ import numpy as np  # added for percentile/statistics of ratios & advantages
 import torch
 from accelerate.utils import DistributedDataParallelKwargs
 from index_advisor.ia_logging import logger as ia_logger
-from index_advisor.mm.model import DATASET_COLUMNS, DATASET_SQLS
+from index_advisor.mm.model import DATASET_COLUMNS, DATASET_SQLS, MultiModalProjector
 from index_advisor.schemas.schema import Index
 from lmf_hooks.reward import get_reward
 from safetensors.torch import save_file
@@ -95,6 +95,7 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
         reward_model: Optional["AutoModelForCausalLMWithValueHead"],
         ref_model: Optional["AutoModelForCausalLMWithValueHead"],
         ref_adapter_name: Optional[str],
+        ref_projectors: tuple[MultiModalProjector, MultiModalProjector],
         tokenizer: "PreTrainedTokenizer",
         processor: Optional["ProcessorMixin"],
         data_collator: "DataCollatorWithPadding",
@@ -220,6 +221,7 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
         self.model_args = model_args
         self.finetuning_args = finetuning_args
         self.ref_adapter_name = ref_adapter_name
+        self.ref_projectors = ref_projectors
         self.reward_model = reward_model
         self.reward_fn = reward_fn
         self.current_device = get_current_device()  # patch for deepspeed training
@@ -535,11 +537,19 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
             if self.is_peft_model and not self.ref_adapter_name
             else nullcontext()
         ):
+            my_model = self.model.pretrained_model.base_model.model
+            raw_projector = my_model.multi_modal_projector
+            raw_projector2 = my_model.multi_modal_projector2
+            my_model.multi_modal_projector = self.ref_projectors[0]
+            my_model.multi_modal_projector2 = self.ref_projectors[1]
+
             if self.ref_adapter_name:
                 self.model.pretrained_model.set_adapter(self.ref_adapter_name)
             yield
             if self.ref_adapter_name:
                 self.model.pretrained_model.set_adapter("default")
+            my_model.multi_modal_projector = raw_projector
+            my_model.multi_modal_projector2 = raw_projector2
 
     @override
     @PPODecorators.empty_device_cache()
@@ -813,6 +823,7 @@ class CustomPPOTrainer(PPOTrainer, Trainer):
             "target": _to_float(config.target),
             "target_kl": _to_float(config.target_kl),
             "horizon": _to_float(config.horizon),
+            "gamma": _to_float(config.gamma),
             "lam": _to_float(config.lam),
             "cliprange": _to_float(config.cliprange),
             "cliprange_value": _to_float(config.cliprange_value),

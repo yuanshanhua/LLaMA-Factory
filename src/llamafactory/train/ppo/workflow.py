@@ -18,6 +18,7 @@
 import os
 import random
 import time
+from copy import deepcopy
 from typing import TYPE_CHECKING, Callable, Optional
 
 import torch
@@ -91,6 +92,18 @@ def run_ppo(
     if isinstance(model.pretrained_model, PeftModel) and model_args.adapter_name_or_path:
         # load 一个 adapter 的副本以供 reference model 使用
         model.pretrained_model.load_adapter(model_args.adapter_name_or_path[-1], "raw")
+
+    # copy 一个 projector 的副本供 ref model 使用
+    # assert isinstance(model, trl.models.modeling_value_head.AutoModelForCausalLMWithValueHead)
+    # assert isinstance(model.pretrained_model, peft.peft_model.PeftModelForCausalLM)
+    # assert isinstance(model.pretrained_model.base_model, peft.tuners.lora.model.LoraModel)
+    # assert isinstance(model.pretrained_model.base_model.model, MyModel)
+    my_model = model.pretrained_model.base_model.model
+    projector = my_model.multi_modal_projector
+    projector2 = my_model.multi_modal_projector2
+    ref_projector = deepcopy(projector) if config().enable else projector
+    ref_projector2 = deepcopy(projector2) if config().enable_sql else projector2
+
     from lmf_hooks.model import hook_rl_model
 
     model = hook_rl_model(model)
@@ -161,6 +174,7 @@ def run_ppo(
         reward_model=reward_model,
         ref_model=ref_model,
         ref_adapter_name="raw" if model_args.adapter_name_or_path else None,
+        ref_projectors=(ref_projector, ref_projector2),
         data_collator=new_collator_rl(tokenizer.pad_token_id),
         training_data_collator=new_collator_rl(tokenizer.pad_token_id, padding_side="right"),
         train_dataset=dataset,
