@@ -65,6 +65,7 @@ def run_ppo(
         Callable[[list["torch.Tensor"], list["torch.Tensor"], "PreTrainedTokenizer"], list["torch.Tensor"]]
     ] = None,
     db_option: DBOption,
+    group_size: int = 1,
     # Optional PPOConfig overrides
     ppo_adap_kl_ctrl: Optional[bool] = None,
     ppo_init_kl_coef: Optional[float] = None,
@@ -142,6 +143,7 @@ def run_ppo(
             extend=True,
             # cost_cache=cost_cache,
             # size_cache=size_cache,
+            group_size=group_size,
         )
     logger.info("为训练数据集构建成本和大小缓存...")
     t = time.time()
@@ -155,6 +157,7 @@ def run_ppo(
         generate=True,
         # cost_cache=cost_cache,
         # size_cache=size_cache,
+        group_size=group_size,
     )
 
     tokenizer.padding_side = "left"  # use left-padding in generation while using right-padding in training
